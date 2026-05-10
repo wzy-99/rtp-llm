@@ -1,5 +1,6 @@
 package org.flexlb.dao.loadbalance;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
@@ -26,4 +27,9 @@ public class Request {
 
     @JsonProperty("request_time_ms")
     private long requestTimeMs;
+
+    @JsonProperty("api_key")
+    @JsonAlias({"apikey", "apiKey"})
+    @ToString.Exclude
+    private String apiKey;
 }
