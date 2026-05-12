@@ -465,6 +465,7 @@ class Pipeline(object):
             token_type_ids=token_type_ids,
             batch_group_size=kwargs.get("batch_group_size", 1),
             batch_group_id=kwargs.get("batch_group_id", -1),
+            api_key=kwargs.get("api_key"),
         )
 
         stop_word_strs = generate_config.stop_words_str
@@ -566,6 +567,7 @@ class Pipeline(object):
         base_request_id: int,
         generate_config_json: dict,
         generate_env_config=None,
+        api_key: Optional[str] = None,
         **kwargs: Any
     ) -> List[GenerateResponse]:
         generate_config = self.create_generate_config(
@@ -602,6 +604,7 @@ class Pipeline(object):
                 mm_inputs=[],
                 generate_config=copy.copy(generate_config),
                 tokenizer=self.tokenizer,
+                api_key=api_key,
             )
             inputs.append(gen_input)
 

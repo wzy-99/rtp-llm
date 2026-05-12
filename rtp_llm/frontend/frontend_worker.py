@@ -168,13 +168,18 @@ class FrontendWorker:
         return token_ids, tokens
 
     async def batch_infer(
-        self, prompts: List[str], request_id: int, generate_config: dict
+        self,
+        prompts: List[str],
+        request_id: int,
+        generate_config: dict,
+        api_key: Optional[str] = None,
     ) -> BatchPipelineResponse:
         responses = await self.pipeline.batch_infer(
             prompts=prompts,
             base_request_id=request_id,
             generate_config_json=generate_config,
             generate_env_config=self.generate_env_config,
+            api_key=api_key,
         )
         # Reconstruct GenerateConfig to check flags (aux_info, calculate_loss, etc.)
         gc = self.pipeline.create_generate_config(

@@ -41,6 +41,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import extract_api_key
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -482,6 +483,7 @@ class OpenaiEndpoint(object):
         )
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
+        api_key = extract_api_key(raw_request.headers)
 
         # 生成式推荐：chat 链路同样需要从 rendered_prompt 解析已曝光商品并填充
         # banned_combo_token_ids。函数内部做了开关与空值短路，对非推荐场景零侵入。
@@ -509,13 +511,16 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
+            api_key=api_key,
         )
 
         return self._complete_stream_response(
             choice_generator, debug_info, self.tokenizer
         )
 
-    def _prepare_chat_input(self, request_id: int, chat_request):
+    def _prepare_chat_input(
+        self, request_id: int, chat_request, api_key: Optional[str] = None
+    ):
         import torch
 
         from rtp_llm.utils.base_model_datatypes import GenerateInput
@@ -535,6 +540,7 @@ class OpenaiEndpoint(object):
             mm_inputs=rendered_input.multimodal_inputs,
             generate_config=generate_config,
             tokenizer=self.tokenizer,
+            api_key=api_key,
         )
         return gen_input, generate_config
 
@@ -558,7 +564,12 @@ class OpenaiEndpoint(object):
             choice_generator, None, self.tokenizer
         )
 
-    async def batch_chat_completion(self, base_request_id: int, batch_request) -> list:
+    async def batch_chat_completion(
+        self,
+        base_request_id: int,
+        batch_request,
+        api_key: Optional[str] = None,
+    ) -> list:
         inputs = []
         all_configs = []
         for i, chat_request in enumerate(batch_request.requests):
@@ -568,7 +579,7 @@ class OpenaiEndpoint(object):
                 )
             chat_request.stream = False
             gen_input, generate_config = self._prepare_chat_input(
-                base_request_id + i, chat_request
+                base_request_id + i, chat_request, api_key=api_key
             )
             generate_config.is_streaming = False
             inputs.append(gen_input)

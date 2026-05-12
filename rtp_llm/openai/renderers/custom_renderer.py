@@ -402,6 +402,7 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
+        api_key: Optional[str] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -415,6 +416,7 @@ class CustomChatRenderer:
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
+                    api_key=api_key,
                 )
             )
         )

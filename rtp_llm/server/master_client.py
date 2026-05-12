@@ -258,6 +258,9 @@ class MasterClient:
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
         }
+        api_key = input.api_key
+        if api_key:
+            payload["api_key"] = api_key
 
         resp = await self._send_schedule_request(
             master_addr, payload, ttft_timeout_ms, request_id

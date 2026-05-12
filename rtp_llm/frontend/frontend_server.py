@@ -26,6 +26,7 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.request_headers import extract_api_key
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
@@ -237,6 +238,7 @@ class FrontendServer(object):
                 self.server_id,
                 sequence,
             )
+            req["api_key"] = extract_api_key(raw_request.headers)
         except Exception as e:
             return self._handle_exception(req, e)
 
@@ -314,7 +316,7 @@ class FrontendServer(object):
         try:
             assert self._openai_endpoint is not None
             responses = await self._openai_endpoint.batch_chat_completion(
-                request_id, request
+                request_id, request, api_key=extract_api_key(raw_request.headers)
             )
             return ORJSONResponse(
                 content=BatchChatCompletionResponse(
@@ -346,6 +348,7 @@ class FrontendServer(object):
                 prompts=prompts,
                 request_id=request_id,
                 generate_config=generate_config,
+                api_key=extract_api_key(raw_request.headers),
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
         finally:
