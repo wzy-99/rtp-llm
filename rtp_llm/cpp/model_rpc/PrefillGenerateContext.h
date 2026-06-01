@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -48,8 +50,8 @@ struct RPCContext {
         return request->request_id();
     }
 
-    const GenerateInputPB*                 request;
-    grpc::ServerWriter<GenerateOutputsPB>* writer;
+    const GenerateInputPB*                              request;
+    grpc::internal::WriterInterface<GenerateOutputsPB>* writer;
 };
 
 class PrefillGenerateContext: public GenerateContext {
@@ -88,10 +90,12 @@ public:
     std::shared_ptr<RpcService::Stub>    stub;
     std::shared_ptr<grpc::ClientContext> client_context;
     std::shared_ptr<ClientStream>        client_stream;
-    bool                                 grpc_stream_closed             = false;
-    grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
-    PrefillStatInfo                      stat_info;
-    int64_t                              loading_cache_requests = 0;
+    std::function<void(const std::shared_ptr<grpc::ClientContext>&, const std::shared_ptr<GenerateStream>&)>
+                    refresh_cancel_state;
+    bool            grpc_stream_closed             = false;
+    grpc::Status    last_grpc_stream_closed_status = grpc::Status::OK;
+    PrefillStatInfo stat_info;
+    int64_t         loading_cache_requests = 0;
 };
 
 }  // namespace rtp_llm

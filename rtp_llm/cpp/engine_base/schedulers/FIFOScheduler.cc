@@ -84,13 +84,13 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
     const auto reserve_step = stream->reserveStep();
     if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
         const auto allowed_input_length = reserve_step <= max_seq_len_ ? max_seq_len_ - reserve_step : 0;
-        auto       error_info           = autil::StringUtil::formatString(
-            "input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
-            "allowed max input len for speculative decoding is %zu",
-            input_length,
-            reserve_step,
-            max_seq_len_,
-            allowed_input_length);
+        auto       error_info =
+            autil::StringUtil::formatString("input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
+                                            "allowed max input len for speculative decoding is %zu",
+                                            input_length,
+                                            reserve_step,
+                                            max_seq_len_,
+                                            allowed_input_length);
         stream->reportError(ErrorCode::LONG_PROMPT_ERROR, error_info);
         return false;
     }
@@ -144,7 +144,8 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
 }
 
 bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) const {
+                                         const GenerateStreamPtr&       new_stream,
+                                         bool                           force_batch) const {
     RTP_LLM_PROFILE_FUNCTION();
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         // Decode-only scheduling can top up an existing running decode batch.
@@ -165,6 +166,13 @@ bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
     }
     if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
         return false;
+    }
+
+    // force_batch groups are budgeted by FlexLB, so do not split a complete group
+    // on the engine-side token cap.
+    if (force_batch && !streams.empty() && streams.front()->forceBatch()
+        && streams.front()->batchGroupId() == new_stream->batchGroupId()) {
+        return true;
     }
 
     int max_token_size = new_stream->contextLength();
@@ -224,9 +232,8 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr>             admitted_streams;
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
-    const size_t inited_kv_streams =
-        max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
-    size_t                              admitted_new_init_streams = 0;
+    const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    size_t       admitted_new_init_streams = 0;
 
     // Batch group scheduling support:
     // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
@@ -264,11 +271,14 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         // Check if this stream can be scheduled based on batch group rules
         if (force_batch && stream->batchGroupId() != -1) {
             auto& info = request_group_info[stream->batchGroupId()];
-            // Check timeout: if expired, treat as normal stream
             if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
+                RTP_LLM_LOG_WARNING("force_batch group %ld incomplete: got %d/%d after %ldms, degrading to normal",
+                                    stream->batchGroupId(),
+                                    info.count,
+                                    stream->batchGroupSize(),
+                                    now - info.first_arrival_time);
                 force_batch = false;
             } else if (info.count < stream->batchGroupSize()) {
-                // Group incomplete, skip this stream
                 it++;
                 continue;
             }
@@ -305,7 +315,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             continue;
         }
 
-        if (!stream->hasError() && evaluateRunningBatch(admitted_streams, stream)) {
+        if (!stream->hasError() && evaluateRunningBatch(admitted_streams, stream, force_batch)) {
             if (!stream->hasEvent(StreamEvents::CanRun)) {
                 stream->reportEvent(StreamEvents::CanRun);
             }

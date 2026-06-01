@@ -84,10 +84,9 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     return serializeErrorMsg(request_key, RequestInfo(), error_info);
 }
 
-grpc::Status LocalRpcServer::serializeErrorMsg(const string&      request_key,
-                                               const RequestInfo& request_info,
-                                               ErrorInfo          error_info) {
-    const auto& error_msg = error_info.ToString();
+grpc::Status
+LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
+    const auto& error_msg       = error_info.ToString();
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
@@ -130,7 +129,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
-        if (context->IsCancelled()) {
+        if (context && context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
@@ -158,7 +157,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    auto input = QueryConverter::transQuery(request);
+    auto input                    = QueryConverter::transQuery(request);
     generate_context.request_info = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,
