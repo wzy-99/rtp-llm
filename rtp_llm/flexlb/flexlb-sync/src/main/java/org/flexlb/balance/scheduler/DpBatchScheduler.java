@@ -419,7 +419,8 @@ public class DpBatchScheduler {
 
                 EngineRpcService.GenerateConfigPB.Builder gcb = ib.getGenerateConfigBuilder();
                 gcb.setForceBatch(com.google.protobuf.Int32Value.of(1));
-                gcb.setBatchGroupTimeout(com.google.protobuf.Int32Value.of(100));
+                gcb.setBatchGroupTimeout(com.google.protobuf.Int32Value.of(
+                        (int) configService.loadBalanceConfig().getDpBatchTimeoutMs()));
                 gcb.clearRoleAddrs();
                 ServerStatus prefillSs = req.prefill();
                 if (prefillSs != null) {

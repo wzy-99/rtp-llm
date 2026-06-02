@@ -145,7 +145,7 @@ public class RouteService {
         boolean forceDisableSp = reqOk && req.isForceDisableSpRun();
         boolean decision = schedulerOk && cfgOk && reqOk
                 && maxNewTokens > 1 && numBeams <= 1 && !forceDisableSp;
-        logger.warn("dp-batch gate decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={}",
+        logger.debug("dp-batch gate decision={} scheduler={} cfgDpBalance={} req={} maxNewTokens={} numBeams={} forceDisableSp={}",
                 decision, schedulerOk, cfgOk, reqOk, maxNewTokens, numBeams, forceDisableSp);
         return decision;
     }
