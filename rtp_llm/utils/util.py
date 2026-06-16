@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -9,6 +7,15 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
+
+import aiohttp
+import psutil
+import requests
+import torch
+from aiohttp import ClientConnectorError, ServerTimeoutError
+from fastapi.responses import JSONResponse
+
+from rtp_llm import _ft_pickler
 
 
 class AtomicCounter:
@@ -46,14 +53,7 @@ class AtomicCounter:
 PathLike = Union[str, Path]
 
 
-def _torch_module():
-    import torch
-
-    return torch
-
-
-def to_torch_dtype(maybe_str_dtype: Any):
-    torch = _torch_module()
+def to_torch_dtype(maybe_str_dtype: Union[str, torch.dtype]) -> torch.dtype:
     if isinstance(maybe_str_dtype, torch.dtype):
         dtype = maybe_str_dtype
     else:
@@ -120,7 +120,6 @@ def generate_pad_mask(
             True if init_step + input_length[i] <= j < init_step + max_input_length,
             where i is a batch-beam index and j is a time step modulo by memory_length.
     """
-    torch = _torch_module()
     max_input_length = input_lengths.max()
     input_lengths = input_lengths.unsqueeze(1)
     shift = init_step % memory_length
@@ -144,9 +143,6 @@ def get_ckpt_file_from_index(ckpt_path: str, model_index_file: str) -> List[str]
 
 
 def load_ckpt(ckpt_path: str) -> Dict[str, Any]:
-    torch = _torch_module()
-    from rtp_llm import _ft_pickler
-
     if os.path.isfile(ckpt_path):
         return torch.load(ckpt_path, map_location="cpu", pickle_module=_ft_pickler)
     elif os.path.isdir(ckpt_path):
@@ -180,7 +176,6 @@ def copy_gemm_config():
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
-    torch = _torch_module()
     return {torch.int8: 1, torch.half: 2, torch.bfloat16: 2, torch.float: 4}[dtype]
 
 
@@ -236,7 +231,7 @@ def has_overlap_kmp(a: str, b: str) -> bool:
 
 async def async_request_server(
     method: str, server_port: int, uri: str = "", req: Dict[str, Any] = None
-) -> Union[Any, dict[str, Any]]:
+) -> Union[JSONResponse, dict[str, Any]]:
     """
     异步HTTP请求服务 (基于aiohttp实现)
 
@@ -249,10 +244,6 @@ async def async_request_server(
     req = req or {}
     url = f"http://localhost:{server_port}/{uri.strip('/')}"
     # timeout = aiohttp.ClientTimeout(total=50, connect=30)  # 总超时50s，连接超时30s
-
-    import aiohttp
-    from aiohttp import ClientConnectorError, ServerTimeoutError
-    from fastapi.responses import JSONResponse
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -293,10 +284,8 @@ async def async_request_server(
         )
 
 
-async def _handle_response(response) -> Dict[str, Any]:
+async def _handle_response(response: aiohttp.ClientResponse) -> Dict[str, Any]:
     """统一处理HTTP响应"""
-    import aiohttp
-
     try:
         # 处理非200状态码
         if response.status != 200:
@@ -319,22 +308,27 @@ async def _handle_response(response) -> Dict[str, Any]:
         }
 
 
-def wait_sever_done(server_process, port: int, timeout: int = 1600):
-    import psutil
-    import requests
-
+def wait_sever_done(
+    server_process, port: int, timeout: int = 1600, health_check_path: str = "/health"
+):
     host = "localhost"
     retry_interval = 1  # 重试间隔（秒）
     start_time = time.time()
 
     port = str(port)
+    health_check_path = health_check_path or "/health"
+    if not health_check_path.startswith("/"):
+        health_check_path = "/" + health_check_path
 
-    logging.info(f"等待pid[{server_process.pid}]启动中...\n端口 {port}")
+    logging.info(
+        f"等待pid[{server_process.pid}]启动中...\n端口 {port}, health path {health_check_path}"
+    )
     while True:
         try:
             # 使用 HTTP health check 检查服务是否准备就绪
             response = requests.get(
-                f"http://{host}:{port}/health", timeout=retry_interval
+                f"http://{host}:{port}{health_check_path}",
+                timeout=retry_interval,
             )
             logging.info(
                 f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
@@ -380,8 +374,6 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
 def stop_server(
     server_process,
 ):
-    import psutil
-
     if server_process is not None and server_process.pid is not None:
         try:
             # 如果只kill start_server，会残留 backend/frontend 占用显存。

@@ -1,11 +1,12 @@
 package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.enums.TaskPhase;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -36,8 +37,17 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        long queueSize = effectiveQueueSize(workerStatus);
+        long queueSize = countWaitingTasks(workerStatus);
         return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
+    }
+
+    @Override
+    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
+        if (endpoint == null || !endpoint.getStatus().isAlive()) {
+            return false;
+        }
+        long queueSize = countWaitingTasks(endpoint);
+        return endpoint.getStatus().updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
     }
 
     @Override
@@ -68,7 +78,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long queueSize = effectiveQueueSize(workerStatus);
+        long queueSize = countWaitingTasks(workerStatus);
 
         if (queueSize <= 0) {
             return 0.0;
@@ -79,8 +89,19 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         }
     }
 
-    private long effectiveQueueSize(WorkerStatus workerStatus) {
-        long waitingTaskCount = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
-        return Math.max(waitingTaskCount, workerStatus.getLocalPendingTaskCount());
+    private static long countWaitingTasks(WorkerStatus workerStatus) {
+        if (MapUtils.isEmpty(workerStatus.getRunningTaskList())) {
+            return 0;
+        }
+        return workerStatus.getRunningTaskList().values().stream()
+                .filter(t -> t.getPhase() != TaskPhase.RUNNING).count();
+    }
+
+    private static long countWaitingTasks(WorkerEndpoint endpoint) {
+        if (MapUtils.isEmpty(endpoint.getStatus().getRunningTaskList())) {
+            return 0;
+        }
+        return endpoint.getStatus().getRunningTaskList().values().stream()
+                .filter(t -> t.getPhase() != TaskPhase.RUNNING).count();
     }
 }

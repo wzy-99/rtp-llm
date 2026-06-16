@@ -1,5 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -7,6 +10,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -15,8 +19,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -45,7 +49,8 @@ class FlexlbBatchSchedulerTest {
     private EngineWorkerStatus engineWorkerStatus;
     private FlexlbBatchScheduler scheduler;
     private FlexlbConfig config;
-    private final List<EngineRpcService.BatchEnqueueRequestPB> sentBatches = new CopyOnWriteArrayList<>();
+    private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
+    private final List<String> sentEndpoints = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() {
@@ -58,22 +63,43 @@ class FlexlbBatchSchedulerTest {
         config.setScheduleWorkerSize(1);
         config.setFlexlbBatchSizeMax(2);
         config.setFlexlbBatchWindowMs(10_000);
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchFillThreshold(1.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             return successRoute(ctx.getRequestId());
         });
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
-                    EngineRpcService.BatchEnqueueRequestPB request = inv.getArgument(2);
+                    sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
                     sentBatches.add(request);
                     return ackFor(request);
                 });
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
-        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus);
+        EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null);
+        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
+        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
+                endpointRegistry, dispatcher);
+
+        // Create endpoint and batcher for the worker that successRoute() returns
+        String ipPort = "10.0.0.1:8080";
+        WorkerStatus ws = new WorkerStatus();
+        ws.setIp("10.0.0.1");
+        ws.setPort(8080);
+        ws.setGrpcPort(9080);
+        PrefillEndpoint endpoint = new PrefillEndpoint(ws, config, scheduler);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("10.0.0.1");
+        prefill.setHttpPort(8080);
+        prefill.setGrpcPort(9080);
+        prefill.setRole(RoleType.PREFILL);
+        endpointRegistry.getOrCreatePrefill(ipPort, k -> endpoint);
     }
 
     @AfterEach
@@ -96,18 +122,141 @@ class FlexlbBatchSchedulerTest {
         assertTrue(secondResponse.isEnqueuedByMaster());
 
         assertEquals(1, sentBatches.size());
-        EngineRpcService.BatchEnqueueRequestPB batch = sentBatches.getFirst();
-        assertEquals(2, batch.getInputsCount());
-        assertEquals(2, batch.getInputs(0).getBatchGroupSize());
-        assertEquals(batch.getBatchId(), batch.getInputs(0).getBatchGroupId().getValue());
-        assertEquals(batch.getBatchId(), batch.getInputs(1).getBatchGroupId().getValue());
-        assertEquals(1, batch.getInputs(0).getGenerateConfig().getForceBatch().getValue());
-        assertEquals(77, batch.getInputs(0).getGenerateConfig().getBatchGroupTimeout().getValue());
-        assertEquals(2, batch.getInputs(0).getGenerateConfig().getRoleAddrsCount());
-        assertEquals(EngineRpcService.RoleAddrPB.RoleType.PREFILL,
-                batch.getInputs(0).getGenerateConfig().getRoleAddrs(0).getRole());
-        assertEquals(EngineRpcService.RoleAddrPB.RoleType.DECODE,
-                batch.getInputs(0).getGenerateConfig().getRoleAddrs(1).getRole());
+        EngineRpcService.EnqueueBatchRequestPB batch = sentBatches.getFirst();
+        List<EngineRpcService.GenerateInputPB> inputs = batchInputs(batch);
+        assertEquals(1, batch.getDpSlotsCount());
+        assertEquals(0, batch.getDpSlots(0).getDpRank());
+        assertEquals(2, batch.getDpSlots(0).getRequestsCount());
+        assertEquals(2, inputs.size());
+        assertEquals(2, inputs.get(0).getGroupSize());
+        assertEquals(batch.getBatchId(), inputs.get(0).getGroupId().getValue());
+        assertEquals(batch.getBatchId(), inputs.get(1).getGroupId().getValue());
+        assertEquals(77, inputs.get(0).getGenerateConfig().getGroupTimeout().getValue());
+        assertEquals(2, inputs.get(0).getGenerateConfig().getRoleAddrsCount());
+        assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                inputs.get(0).getGenerateConfig().getRoleAddrs(0).getRole());
+        assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                inputs.get(0).getGenerateConfig().getRoleAddrs(1).getRole());
+    }
+
+    @Test
+    void submit_groups_batch_payload_by_dp_rank() throws Exception {
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
+            BalanceContext ctx = inv.getArgument(0);
+            long requestId = ctx.getRequestId();
+            return successRouteWithPrefillDp(requestId, requestId == 71L ? 0 : 1);
+        });
+
+        CompletableFuture<Response> first = scheduler.submit(context(71));
+        CompletableFuture<Response> second = scheduler.submit(context(72));
+
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(1, sentBatches.size());
+        EngineRpcService.EnqueueBatchRequestPB batch = sentBatches.getFirst();
+        assertEquals(2, batch.getDpSlotsCount());
+        assertEquals(0, batch.getDpSlots(0).getDpRank());
+        assertEquals(1, batch.getDpSlots(1).getDpRank());
+        assertEquals(1, batch.getDpSlots(0).getRequestsCount());
+        assertEquals(1, batch.getDpSlots(1).getRequestsCount());
+    }
+
+    @Test
+    void batch_enqueue_error_list_fails_only_rejected_request() throws Exception {
+        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    List<EngineRpcService.GenerateInputPB> inputs = batchInputs(request);
+                    return EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                            .setBatchId(request.getBatchId())
+                            .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                                    .setRequestId(inputs.get(0).getRequestId())
+                                    .build())
+                            .addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                                    .setRequestId(inputs.get(1).getRequestId())
+                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                            .setErrorCode(13)
+                                            .setErrorMessage("decode alloc failed")
+                                            .build())
+                                    .build())
+                            .build();
+                });
+
+        CompletableFuture<Response> first = scheduler.submit(context(81));
+        CompletableFuture<Response> second = scheduler.submit(context(82));
+
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertThrows(Exception.class, () -> second.get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void batch_enqueue_missing_success_fails_missing_request() throws Exception {
+        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    List<EngineRpcService.GenerateInputPB> inputs = batchInputs(request);
+                    return EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                            .setBatchId(request.getBatchId())
+                            .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                                    .setRequestId(inputs.get(0).getRequestId())
+                                    .build())
+                            .build();
+                });
+
+        CompletableFuture<Response> first = scheduler.submit(context(83));
+        CompletableFuture<Response> second = scheduler.submit(context(84));
+
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        Exception thrown = assertThrows(Exception.class, () -> second.get(2, TimeUnit.SECONDS));
+        assertTrue(thrown.getCause().getMessage().contains("EnqueueBatch missing ack for request 84"));
+    }
+
+    @Test
+    void dispatch_uses_dp0_entrypoint_when_status_available() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> successRouteWithPrefillDp(91, 1));
+
+        WorkerStatus dp0 = new WorkerStatus();
+        dp0.setIp("10.0.0.9");
+        dp0.setPort(8090);
+        dp0.setGrpcPort(9090);
+        dp0.setDpRank(0);
+        dp0.getStatusVersion().set(1);
+        PrefillEndpoint dp0Endpoint = new PrefillEndpoint(dp0, config, scheduler);
+        when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
+                .thenReturn(Map.of("10.0.0.9:8090", dp0Endpoint));
+
+        Response response = scheduler.submit(context(91)).get(2, TimeUnit.SECONDS);
+
+        assertTrue(response.isSuccess());
+        assertEquals("10.0.0.9:8091", sentEndpoints.getFirst());
+        assertEquals(1, sentBatches.getFirst().getDpSlots(0).getDpRank());
+    }
+
+    @Test
+    void dispatch_falls_back_to_selected_prefill_when_dp0_status_not_synced() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> successRouteWithPrefillDp(92, 1));
+
+        WorkerStatus unsyncedDp0 = new WorkerStatus();
+        unsyncedDp0.setIp("10.0.0.9");
+        unsyncedDp0.setPort(8090);
+        unsyncedDp0.setGrpcPort(9090);
+        unsyncedDp0.setDpRank(0);
+        PrefillEndpoint unsyncedEp = new PrefillEndpoint(unsyncedDp0, config, scheduler);
+        when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
+                .thenReturn(Map.of("10.0.0.9:8090", unsyncedEp));
+
+        Response response = scheduler.submit(context(92)).get(2, TimeUnit.SECONDS);
+
+        assertTrue(response.isSuccess());
+        assertEquals("10.0.0.1:9080", sentEndpoints.getFirst());
+        assertEquals(1, sentBatches.getFirst().getDpSlots(0).getDpRank());
     }
 
     @Test
@@ -127,9 +276,9 @@ class FlexlbBatchSchedulerTest {
         CountDownLatch batchStarted = new CountDownLatch(1);
         CountDownLatch cancelSeen = new CountDownLatch(1);
 
-        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
+        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
-                    EngineRpcService.BatchEnqueueRequestPB request = inv.getArgument(2);
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
                     sentBatches.add(request);
                     batchStarted.countDown();
                     assertTrue(cancelSeen.await(2, TimeUnit.SECONDS));
@@ -163,6 +312,341 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void submit_rejects_when_global_inflight_limit_reached() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchMaxInflight(1);
+
+        CountDownLatch batchBlocked = new CountDownLatch(1);
+        CountDownLatch releaseBlock = new CountDownLatch(1);
+        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    batchBlocked.countDown();
+                    assertTrue(releaseBlock.await(5, TimeUnit.SECONDS));
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    return ackFor(request);
+                });
+
+        scheduler.submit(context(41));
+        assertTrue(batchBlocked.await(2, TimeUnit.SECONDS));
+
+        Response rejected = scheduler.submit(context(42)).get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+
+        releaseBlock.countDown();
+    }
+
+    @Test
+    void batcher_rejects_when_queue_full() throws Exception {
+        config.setFlexlbBatchQueueMaxSize(1);
+        config.setFlexlbBatchFillThreshold(1.0);
+
+        CompletableFuture<Response> first = scheduler.submit(context(51));
+        assertFalse(first.isDone());
+
+        Response rejected = scheduler.submit(context(52)).get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+    }
+
+    @Test
+    void processQueue_drops_expired_request() throws Exception {
+        config.setCostSloMs(0L);
+        config.setCostSloRiskMarginMs(0L);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(10000);
+
+        CompletableFuture<Response> future = scheduler.submit(context(100));
+
+        assertThrows(Exception.class, () -> future.get(2, TimeUnit.SECONDS));
+        verify(grpcClient, never()).batchEnqueue(anyString(), anyInt(), any(), anyLong());
+    }
+
+    @Test
+    void processQueue_dispatches_urgent_request_alone() throws Exception {
+        config.setCostSloMs(5000L);
+        config.setCostSloRiskMarginMs(10000L);
+        config.setFlexlbBatchSizeMax(8);
+
+        CompletableFuture<Response> f1 = scheduler.submit(context(201));
+        assertFalse(f1.isDone());
+        CompletableFuture<Response> f2 = scheduler.submit(context(202));
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size());
+        assertEquals(1, batchInputs(sentBatches.get(0)).size());
+        assertEquals(1, batchInputs(sentBatches.get(1)).size());
+    }
+
+    @Test
+    void processQueue_binary_search_limits_batch_by_token_budget() throws Exception {
+        config.setCostSloMs(7500L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(8);
+        config.setFlexlbBatchFillThreshold(2.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(301, 2000));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(302, 2000));
+        CompletableFuture<Response> f3 = scheduler.submit(contextWithSeqLen(303, 2000));
+        Thread.sleep(50);
+
+        config.setFlexlbBatchFillThreshold(0.3);
+
+        f1.get(3, TimeUnit.SECONDS);
+        f2.get(3, TimeUnit.SECONDS);
+        f3.get(3, TimeUnit.SECONDS);
+
+        assertTrue(sentBatches.stream().anyMatch(b -> batchInputs(b).size() == 2),
+                "Budget allows ~5450 tokens: 2 items of 2000 = 4000 fits, 3 items = 6000 exceeds");
+        int totalInputs = sentBatches.stream()
+                .mapToInt(b -> batchInputs(b).size()).sum();
+        assertEquals(3, totalInputs);
+    }
+
+    @Test
+    void processQueue_waits_when_fill_below_threshold() throws Exception {
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(1000);
+        config.setFlexlbBatchFillThreshold(0.9);
+
+        CompletableFuture<Response> future = scheduler.submit(context(401));
+
+        Thread.sleep(100);
+        assertFalse(future.isDone(), "Should wait when fill ratio is below threshold");
+
+        config.setFlexlbBatchFillThreshold(0.001);
+        assertTrue(future.get(2, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
+    void processQueue_dispatches_when_batch_size_reached() throws Exception {
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(4);
+        config.setFlexlbBatchFillThreshold(0.99);
+
+        CompletableFuture<Response> f1 = scheduler.submit(context(501));
+        CompletableFuture<Response> f2 = scheduler.submit(context(502));
+        CompletableFuture<Response> f3 = scheduler.submit(context(503));
+        CompletableFuture<Response> f4 = scheduler.submit(context(504));
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f3.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f4.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertTrue(sentBatches.stream().anyMatch(b -> batchInputs(b).size() == 4),
+                "Should dispatch when picked.size() reaches batchSizeMax despite low fill ratio");
+    }
+
+    @Test
+    void processQueue_park_converges_to_urgent_dispatch() throws Exception {
+        // budget = sloMs(300) - predMs(128) = 172ms, margin = 100ms
+        // fillThreshold=2.0 → fillRatio can never reach it (max 1.0)
+        // batchSizeMax=1000 → single request can't trigger size condition
+        // So request parks, budget shrinks each 1ms iteration, after ~72ms budget < margin → urgent dispatch
+        config.setCostSloMs(300L);
+        config.setCostSloRiskMarginMs(100L);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(1000);
+
+        CompletableFuture<Response> future = scheduler.submit(context(901));
+
+        assertTrue(future.get(2, TimeUnit.SECONDS).isSuccess());
+        assertEquals(1, sentBatches.size());
+        assertEquals(1, batchInputs(sentBatches.getFirst()).size());
+    }
+
+    @Test
+    void processQueue_fillRatio_triggers_dispatch() throws Exception {
+        // budget = sloMs(500) - predMs(128) = 372ms, margin = 50ms
+        // binary search: lo=128, hi=500, converges to ~322 → batchMaxTokens ≈ 322
+        // fillRatio = 128/322 ≈ 0.40 >= threshold(0.3) → dispatches immediately via fillRatio
+        // batchSizeMax=1000 ensures size condition is NOT the trigger
+        config.setCostSloMs(500L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchMaxCapacity(500);
+        config.setFlexlbBatchFillThreshold(0.3);
+        config.setFlexlbBatchSizeMax(1000);
+
+        CompletableFuture<Response> future = scheduler.submit(context(1001));
+
+        assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
+        assertEquals(1, sentBatches.size());
+        assertEquals(1, batchInputs(sentBatches.getFirst()).size());
+    }
+
+    @Test
+    void processQueue_binary_search_lo_equals_hi() throws Exception {
+        // headTokens(500) > maxCapacity(100) → lo > hi, binary search loop never executes
+        // batchMaxTokens = max(headTokens, lo) = 500
+        // greedy: 500 + 50 = 550 > 500 → second request doesn't fit
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchMaxCapacity(100);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(100);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1101, 500));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1102, 50));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.01);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertEquals(2, sentBatches.size());
+        assertEquals(1, batchInputs(sentBatches.get(0)).size(),
+                "Head alone — headTokens exceeds maxCapacity so no room for others");
+        assertEquals(1, batchInputs(sentBatches.get(1)).size());
+    }
+
+    @Test
+    void processQueue_maxScan_limits_greedy_fill() throws Exception {
+        // scanAhead=1: greedy only checks 1 candidate beyond head
+        // 3 requests queued, but only head + 1 scanned → first batch has 2 inputs, not 3
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchScanAhead(1);
+        config.setFlexlbBatchSizeMax(100);
+        config.setFlexlbBatchFillThreshold(2.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(context(1201));
+        CompletableFuture<Response> f2 = scheduler.submit(context(1202));
+        CompletableFuture<Response> f3 = scheduler.submit(context(1203));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.001);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f3.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size(), "maxScan=1 splits 3 requests into 2 batches");
+        assertEquals(2, batchInputs(sentBatches.get(0)).size(),
+                "First batch: head + 1 scanned candidate");
+        assertEquals(1, batchInputs(sentBatches.get(1)).size());
+    }
+
+    @Test
+    void processQueue_greedy_skips_oversized_and_picks_smaller() throws Exception {
+        // Head=150tok, candidates: 120tok (too large: 150+120=270>200) and 50tok (fits: 150+50=200≤200)
+        // Greedy skips 120-token and picks 50-token regardless of PQ iteration order
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchMaxCapacity(200);
+        config.setFlexlbBatchScanAhead(10);
+        config.setFlexlbBatchSizeMax(100);
+        config.setFlexlbBatchFillThreshold(2.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1301, 150));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1302, 120));
+        CompletableFuture<Response> f3 = scheduler.submit(contextWithSeqLen(1303, 50));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.01);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f3.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size());
+        EngineRpcService.EnqueueBatchRequestPB firstBatch = sentBatches.get(0);
+        assertEquals(2, batchInputs(firstBatch).size(), "Head(150) + small(50) fit; large(120) skipped");
+
+        long[] ids = batchInputs(firstBatch).stream()
+                .mapToLong(EngineRpcService.GenerateInputPB::getRequestId).sorted().toArray();
+        assertEquals(1301, ids[0], "150-token head in first batch");
+        assertEquals(1303, ids[1], "50-token picked over 120-token");
+
+        assertEquals(1, batchInputs(sentBatches.get(1)).size());
+        assertEquals(1302, batchInputs(sentBatches.get(1)).get(0).getRequestId(),
+                "Skipped 120-token dispatches alone in second batch");
+    }
+
+    @Test
+    void processQueue_bsIter_exhaustion_uses_conservative_bound() throws Exception {
+        // bsIter=1 with huge maxCapacity: binary search does only 1 step
+        // mid ≈ 50050, estimateMs(50050) >> budget(350) → hi drops, lo stays at headTokens(100)
+        // batchMaxTokens = 100, so second 100-token request doesn't fit (100+100=200>100)
+        config.setCostSloMs(500L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSearchIter(1);
+        config.setFlexlbBatchMaxCapacity(100000);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(100);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1401, 100));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1402, 100));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.5);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size(),
+                "bsIter=1 yields conservative batchMaxTokens=headTokens, preventing batching");
+        assertEquals(1, batchInputs(sentBatches.get(0)).size());
+        assertEquals(1, batchInputs(sentBatches.get(1)).size());
+    }
+
+    @Test
+    void resolveSloMs_uses_buckets_when_configured() {
+        FlexlbConfig cfg = new FlexlbConfig();
+        cfg.setCostSloMs(500L);
+        cfg.setCostSloBuckets("4096:2000,32768:10000,131072:30000,524288:60000");
+
+        assertEquals(2000L, cfg.resolveSloMs(100));
+        assertEquals(2000L, cfg.resolveSloMs(4096));
+        assertEquals(10000L, cfg.resolveSloMs(4097));
+        assertEquals(10000L, cfg.resolveSloMs(32768));
+        assertEquals(30000L, cfg.resolveSloMs(32769));
+        assertEquals(30000L, cfg.resolveSloMs(131072));
+        assertEquals(60000L, cfg.resolveSloMs(131073));
+        assertEquals(60000L, cfg.resolveSloMs(1000000));
+    }
+
+    @Test
+    void resolveSloMs_falls_back_to_costSloMs_when_no_buckets() {
+        FlexlbConfig cfg = new FlexlbConfig();
+        cfg.setCostSloMs(500L);
+        cfg.setCostSloBuckets("");
+
+        assertEquals(500L, cfg.resolveSloMs(100));
+        assertEquals(500L, cfg.resolveSloMs(100000));
+    }
+
+    @Test
+    void resolveSloMs_handles_unsorted_bucket_input() {
+        FlexlbConfig cfg = new FlexlbConfig();
+        cfg.setCostSloBuckets("131072:30000,4096:2000,32768:10000");
+
+        assertEquals(2000L, cfg.resolveSloMs(1000));
+        assertEquals(10000L, cfg.resolveSloMs(5000));
+        assertEquals(30000L, cfg.resolveSloMs(50000));
+    }
+
+    @Test
+    void dynamic_slo_prevents_drop_for_requests_exceeding_fixed_slo() throws Exception {
+        // With default costSloMs=500 and alpha1=1.0, a 600-token request has
+        // predMs=600 > sloMs=500 → budget=0 → immediate drop.
+        // With buckets "1000:5000,...", sloMs=5000 → budget=4400 → enough to batch.
+        config.setCostSloBuckets("1000:5000,100000:50000");
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(2);
+        config.setFlexlbBatchFillThreshold(1.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(601, 600));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(602, 600));
+
+        assertTrue(f1.get(3, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(3, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(1, sentBatches.size());
+        assertEquals(2, batchInputs(sentBatches.getFirst()).size());
+    }
+
+    @Test
     void mismatched_generate_input_request_id_fails_before_batch_enqueue() {
         config.setFlexlbBatchSizeMax(1);
 
@@ -172,15 +656,108 @@ class FlexlbBatchSchedulerTest {
         verify(grpcClient, never()).batchEnqueue(anyString(), anyInt(), any(), anyLong());
     }
 
-    private static EngineRpcService.BatchEnqueueResponsePB ackFor(EngineRpcService.BatchEnqueueRequestPB request) {
-        EngineRpcService.BatchEnqueueResponsePB.Builder response =
-                EngineRpcService.BatchEnqueueResponsePB.newBuilder().setBatchId(request.getBatchId());
-        for (EngineRpcService.GenerateInputPB input : request.getInputsList()) {
-            response.addAcks(EngineRpcService.BatchEnqueueAckPB.newBuilder()
+    // ==================== cancel / onRequestsFinished → Decode endpoint release ====================
+
+    @Test
+    void cancel_releases_decode_endpoint_resource() {
+        // Register a DecodeEndpoint at the address the router returns for DECODE
+        WorkerStatus decodeStatus = new WorkerStatus();
+        decodeStatus.setIp("10.0.0.2");
+        decodeStatus.setPort(8081);
+        decodeStatus.setGrpcPort(9081);
+        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
+                "10.0.0.2:8081", decodeStatus);
+
+        // Simulate strategy having reserved resources on the decode endpoint
+        decodeEp.calibrate(null, null, 10000);
+        decodeEp.reserve(17L, 500);
+        assertEquals(1, decodeEp.getInflightCount());
+
+        // Submit a request — router returns decode at 10.0.0.2:8081
+        CompletableFuture<Response> future = scheduler.submit(context(17));
+
+        // Cancel before batch is dispatched
+        scheduler.cancel(17L);
+
+        // Decode endpoint resource should be released
+        assertEquals(0, decodeEp.getInflightCount(),
+                "Cancel should propagate to DecodeEndpoint.release()");
+        assertTrue(future.isCompletedExceptionally());
+    }
+
+    @Test
+    void onRequestsFinished_releases_decode_endpoint_resource() {
+        WorkerStatus decodeStatus = new WorkerStatus();
+        decodeStatus.setIp("10.0.0.2");
+        decodeStatus.setPort(8081);
+        decodeStatus.setGrpcPort(9081);
+        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
+                "10.0.0.2:8081", decodeStatus);
+
+        decodeEp.calibrate(null, null, 10000);
+        decodeEp.reserve(18L, 500);
+        assertEquals(1, decodeEp.getInflightCount());
+
+        // Submit so the request lands in inflight
+        scheduler.submit(context(18));
+
+        // Simulate engine-side request completion
+        scheduler.onRequestsFinished(List.of(18L));
+
+        // Decode endpoint resource should be released
+        assertEquals(0, decodeEp.getInflightCount(),
+                "onRequestsFinished should propagate to DecodeEndpoint.release()");
+    }
+
+    @Test
+    void onRequestsFinished_ignores_unknown_request_ids() {
+        WorkerStatus decodeStatus = new WorkerStatus();
+        decodeStatus.setIp("10.0.0.2");
+        decodeStatus.setPort(8081);
+        decodeStatus.setGrpcPort(9081);
+        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
+                "10.0.0.2:8081", decodeStatus);
+
+        decodeEp.calibrate(null, null, 10000);
+        decodeEp.reserve(19L, 300);
+        assertEquals(1, decodeEp.getInflightCount());
+
+        // onRequestsFinished with a requestId not in inflight
+        scheduler.onRequestsFinished(List.of(99999L));
+
+        // Decode endpoint should NOT be affected
+        assertEquals(1, decodeEp.getInflightCount(),
+                "Unknown request IDs should not trigger release");
+    }
+
+    @Test
+    void cancel_with_decode_endpoint_not_registered_is_noop() {
+        // No DecodeEndpoint registered at 10.0.0.2:8081 — cancel should not throw
+        CompletableFuture<Response> future = scheduler.submit(context(20));
+
+        scheduler.cancel(20L);
+
+        assertTrue(future.isCompletedExceptionally());
+        // No exception thrown — passes
+    }
+
+    private static EngineRpcService.EnqueueBatchResponsePB ackFor(EngineRpcService.EnqueueBatchRequestPB request) {
+        EngineRpcService.EnqueueBatchResponsePB.Builder response =
+                EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(request.getBatchId());
+        for (EngineRpcService.GenerateInputPB input : batchInputs(request)) {
+            response.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                     .setRequestId(input.getRequestId())
                     .build());
         }
         return response.build();
+    }
+
+    private static List<EngineRpcService.GenerateInputPB> batchInputs(
+            EngineRpcService.EnqueueBatchRequestPB request) {
+        return request.getDpSlotsList().stream()
+                .flatMap(slot -> slot.getRequestsList().stream())
+                .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                .toList();
     }
 
     private static BalanceContext context(long requestId) {
@@ -194,44 +771,73 @@ class FlexlbBatchSchedulerTest {
         request.setMaxNewTokens(8);
         request.setNumBeams(1);
         request.setModel("test-model");
-        request.setGenerateInputPbB64(generateInput(generateInputRequestId));
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
         ctx.setConfig(new FlexlbConfig());
+        ctx.setGenerateInputPbBytes(generateInputBytes(generateInputRequestId));
         return ctx;
     }
 
-    private static String generateInput(long requestId) {
+    private static BalanceContext contextWithSeqLen(long requestId, long seqLen) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(seqLen);
+        request.setMaxNewTokens(8);
+        request.setNumBeams(1);
+        request.setModel("test-model");
+
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+        ctx.setConfig(new FlexlbConfig());
+        ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
+        return ctx;
+    }
+
+    private static byte[] generateInputBytes(long requestId) {
         EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(8)
-                        .setBatchGroupTimeout(com.google.protobuf.Int32Value.of(77))
+                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
                         .build())
                 .build();
-        return Base64.getEncoder().encodeToString(input.toByteArray());
+        return input.toByteArray();
     }
 
     private static Response successRoute(long requestId) {
+        return successRouteWithPrefillDp(requestId, 0);
+    }
+
+    private static Response successRouteWithPrefillDp(long requestId, long dpRank) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
-                server(RoleType.PREFILL, "10.0.0.1", 8080, 9080, requestId),
+                server(RoleType.PREFILL, "10.0.0.1", 8080, 9080, requestId, dpRank),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 9081, requestId)
         ));
         return response;
     }
 
     private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+        return server(role, ip, httpPort, grpcPort, requestId, 0);
+    }
+
+    private static ServerStatus server(RoleType role,
+                                       String ip,
+                                       int httpPort,
+                                       int grpcPort,
+                                       long requestId,
+                                       long dpRank) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
         status.setServerIp(ip);
         status.setHttpPort(httpPort);
         status.setGrpcPort(grpcPort);
+        status.setDpRank(dpRank);
         status.setGroup("g1");
         status.setRequestId(requestId);
         return status;

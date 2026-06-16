@@ -17,18 +17,21 @@
 #include <strings.h>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 #include <unistd.h>
 #include <limits.h>
 #include <cstdint>
+#include <map>
 
 using namespace std;
 using namespace autil::legacy;
@@ -135,11 +138,111 @@ struct TheoryHitStatsSnapshot {
     TheoryHitWindowSnapshot window_15m;
 };
 
-void setBatchAckError(BatchEnqueueAckPB* ack, int64_t request_id, int64_t code, const std::string& msg) {
-    ack->set_request_id(request_id);
-    auto* err = ack->mutable_error_info();
-    err->set_error_code(code);
-    err->set_error_message(msg);
+void markResponseEntryDone(const std::shared_ptr<ResponseBufferEntry>& entry, const grpc::Status& status) {
+    if (!entry) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(entry->mu);
+        if (!status.ok()) {
+            entry->error_status = status;
+        }
+        entry->done.store(true);
+        entry->last_activity_us = currentTimeUs();
+        entry->cancel_producer  = nullptr;
+    }
+    entry->cv.notify_all();
+}
+
+grpc::Status statusFromErrorInfo(const ErrorInfo& error_info) {
+    if (!error_info.hasError()) {
+        return grpc::Status::OK;
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL, error_info.ToString());
+}
+
+void addBatchSuccess(EnqueueBatchResponsePB* response, int64_t request_id) {
+    auto* success = response->add_successes();
+    success->set_request_id(request_id);
+}
+
+void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t code, const std::string& msg) {
+    auto* error = response->add_errors();
+    error->set_request_id(request_id);
+    auto* error_info = error->mutable_error_info();
+    error_info->set_error_code(code);
+    error_info->set_error_message(msg);
+}
+
+template<typename T>
+void detachLeftoverFutures(std::vector<std::future<T>>& futures) {
+    auto leftover = std::make_shared<std::vector<std::future<T>>>();
+    for (auto& f : futures) {
+        if (f.valid() && f.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            leftover->push_back(std::move(f));
+        }
+    }
+    if (!leftover->empty()) {
+        std::thread([leftover]() mutable { leftover.reset(); }).detach();
+    }
+}
+
+template<typename T>
+void drainReadyFutures(std::vector<std::future<T>>& futures, std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool all_done  = true;
+        bool any_ready = false;
+        for (auto& f : futures) {
+            if (f.valid()) {
+                if (f.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                    try {
+                        f.get();
+                    } catch (...) {}
+                    any_ready = true;
+                } else {
+                    all_done = false;
+                }
+            }
+        }
+        if (all_done)
+            break;
+        if (!any_ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+}
+
+template<typename T, typename OnReady, typename OnTimeout>
+void collectFutures(std::vector<std::future<T>>&          futures,
+                    std::chrono::steady_clock::time_point deadline,
+                    OnReady&&                             on_ready,
+                    OnTimeout&&                           on_timeout) {
+    std::vector<bool> collected(futures.size(), false);
+    size_t            remaining = futures.size();
+    while (remaining > 0 && std::chrono::steady_clock::now() < deadline) {
+        bool any_ready = false;
+        for (size_t i = 0; i < futures.size(); ++i) {
+            if (!collected[i] && futures[i].wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                collected[i] = true;
+                --remaining;
+                any_ready = true;
+                on_ready(i);
+            }
+        }
+        if (remaining > 0 && !any_ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    for (size_t i = 0; i < futures.size(); ++i) {
+        if (!collected[i]) {
+            if (futures[i].wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                on_ready(i);
+            } else {
+                on_timeout(i);
+            }
+        }
+    }
 }
 
 struct AsyncProducerCancelState {
@@ -644,6 +747,23 @@ void PrefillRpcServer::stopAsyncResponseWorkers() {
     response_worker_cv_.wait(lock, [this] { return response_worker_count_ == 0; });
 }
 
+std::string PrefillRpcServer::batchTargetAddrForDpRank(int dp_rank) const {
+    if (dp_rank < 0 || dp_rank >= maga_init_params_.parallelism_config.dp_size) {
+        return "";
+    }
+    const auto&   all_workers = maga_init_params_.runtime_config.all_worker_grpc_addrs;
+    const int64_t tp_size     = std::max<int64_t>(1, maga_init_params_.parallelism_config.tp_size);
+    const int64_t world_rank  = static_cast<int64_t>(dp_rank) * tp_size;
+    if (world_rank >= 0 && world_rank < static_cast<int64_t>(all_workers.size())) {
+        return all_workers[world_rank];
+    }
+    if (dp_rank == maga_init_params_.parallelism_config.dp_rank
+        && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
+        return maga_init_params_.runtime_config.worker_grpc_addrs.front();
+    }
+    return "";
+}
+
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
                                     py::object                                             mm_process_engine,
                                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
@@ -796,10 +916,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
-    new_request->clear_batch_group_size();
-    new_request->clear_batch_group_id();
-    new_request->mutable_generate_config()->clear_force_batch();
-    new_request->mutable_generate_config()->clear_batch_group_timeout();
+    new_request->clear_group_size();
+    new_request->clear_group_id();
+    new_request->mutable_generate_config()->clear_group_timeout();
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
@@ -1189,345 +1308,701 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     return grpc::Status::OK;
 }
 
-grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context,
-                                            const BatchEnqueueRequestPB* request,
-                                            BatchEnqueueResponsePB*      response) {
+grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context,
+                                            const EnqueueBatchRequestPB* request,
+                                            EnqueueBatchResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
     response->set_batch_id(request->batch_id());
 
-    const int input_count = request->inputs_size();
-    response->mutable_acks()->Reserve(input_count);
-    for (int i = 0; i < input_count; ++i) {
-        response->add_acks();
+    struct TargetBatch {
+        int                                 dp_rank = 0;
+        std::vector<const GenerateInputPB*> inputs;
+    };
+
+    std::map<int, TargetBatch>          targets;
+    std::vector<const GenerateInputPB*> all_inputs;
+    std::unordered_set<int64_t>         seen_request_ids;
+    bool                                duplicate_request_id = false;
+
+    for (const auto& slot : request->dp_slots()) {
+        auto& target   = targets[slot.dp_rank()];
+        target.dp_rank = slot.dp_rank();
+        for (const auto& external_input : slot.requests()) {
+            if (!external_input.has_input()) {
+                addBatchError(response,
+                              /*request_id=*/0,
+                              grpc::StatusCode::INVALID_ARGUMENT,
+                              "EnqueueBatch external request missing input");
+                continue;
+            }
+            const auto& input = external_input.input();
+            all_inputs.push_back(&input);
+            target.inputs.push_back(&input);
+            if (!seen_request_ids.insert(input.request_id()).second) {
+                duplicate_request_id = true;
+            }
+        }
     }
 
+    response->mutable_successes()->Reserve(static_cast<int>(all_inputs.size()));
+    response->mutable_errors()->Reserve(static_cast<int>(all_inputs.size()));
+
+    auto add_error_for_inputs = [](EnqueueBatchResponsePB*                    response,
+                                   const std::vector<const GenerateInputPB*>& inputs,
+                                   int64_t                                    code,
+                                   const std::string&                         message) {
+        for (const auto* input : inputs) {
+            if (input) {
+                addBatchError(response, input->request_id(), code, message);
+            }
+        }
+    };
+
+    if (duplicate_request_id) {
+        response->clear_errors();
+        add_error_for_inputs(
+            response, all_inputs, grpc::StatusCode::ALREADY_EXISTS, "duplicate request_id in EnqueueBatch");
+        return grpc::Status::OK;
+    }
+
+    if (context && context->IsCancelled()) {
+        add_error_for_inputs(response, all_inputs, grpc::StatusCode::CANCELLED, "EnqueueBatch cancelled by caller");
+        return grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueBatch cancelled by caller");
+    }
+
+    struct DispatchTarget {
+        int                   dp_rank = 0;
+        std::string           addr;
+        EnqueueGroupRequestPB request;
+    };
+
+    const int                   local_dp_rank = static_cast<int>(maga_init_params_.parallelism_config.dp_rank);
+    std::vector<DispatchTarget> dispatch_targets;
+    dispatch_targets.reserve(targets.size());
+    for (const auto& pair : targets) {
+        const auto& target = pair.second;
+        if (target.inputs.empty()) {
+            continue;
+        }
+        DispatchTarget dispatch_target;
+        dispatch_target.dp_rank = target.dp_rank;
+        dispatch_target.request.set_batch_id(request->batch_id());
+        dispatch_target.request.set_dp_rank(target.dp_rank);
+        for (const auto* input : target.inputs) {
+            auto* dp_input = dispatch_target.request.add_requests();
+            dp_input->mutable_input()->CopyFrom(*input);
+        }
+        if (target.dp_rank != local_dp_rank) {
+            dispatch_target.addr = batchTargetAddrForDpRank(target.dp_rank);
+            if (dispatch_target.addr.empty()) {
+                add_error_for_inputs(response,
+                                     target.inputs,
+                                     grpc::StatusCode::INVALID_ARGUMENT,
+                                     "invalid EnqueueBatch dp_rank " + std::to_string(target.dp_rank));
+                continue;
+            }
+        }
+        dispatch_targets.push_back(std::move(dispatch_target));
+    }
+
+    struct DispatchResult {
+        grpc::Status           status;
+        EnqueueBatchResponsePB dp_response;
+    };
+
+    const auto dispatch_timeout_ms = maga_init_params_.pd_sep_config.batch_dispatch_timeout_ms;
+    const auto dispatch_deadline   = std::chrono::steady_clock::now() + std::chrono::milliseconds(dispatch_timeout_ms);
+    std::vector<std::future<DispatchResult>> dispatch_futures;
+    dispatch_futures.reserve(dispatch_targets.size());
+    for (auto& target : dispatch_targets) {
+        dispatch_futures.push_back(
+            std::async(std::launch::async, [this, target = std::move(target)]() -> DispatchResult {
+                DispatchResult result;
+                if (target.dp_rank == static_cast<int>(maga_init_params_.parallelism_config.dp_rank)) {
+                    result.status = EnqueueGroup(/*context=*/nullptr, &target.request, &result.dp_response);
+                    return result;
+                }
+
+                try {
+                    auto connect_status = resource_.rpc_pool.getConnection(target.addr);
+                    if (!connect_status.ok()) {
+                        result.status = grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                                     "get EnqueueGroup connection failed: "
+                                                         + std::string(connect_status.status().message()));
+                    } else {
+                        grpc::ClientContext client_context;
+                        auto                timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+                        if (timeout_ms > 0) {
+                            client_context.set_deadline(std::chrono::system_clock::now()
+                                                        + std::chrono::milliseconds(timeout_ms));
+                        }
+                        result.status = connect_status.value().stub->EnqueueGroup(
+                            &client_context, target.request, &result.dp_response);
+                    }
+                } catch (const std::exception& e) {
+                    result.status = grpc::Status(grpc::StatusCode::INTERNAL,
+                                                 "EnqueueGroup forward exception: " + std::string(e.what()));
+                } catch (...) {
+                    result.status = grpc::Status(grpc::StatusCode::INTERNAL, "EnqueueGroup forward unknown exception");
+                }
+                return result;
+            }));
+    }
+
+    auto merge_response = [&](const EnqueueGroupRequestPB&  dp_request,
+                              const grpc::Status&           status,
+                              const EnqueueBatchResponsePB& dp_response) {
+        if (!status.ok()) {
+            for (const auto& dp_input : dp_request.requests()) {
+                if (dp_input.has_input()) {
+                    addBatchError(response, dp_input.input().request_id(), status.error_code(), status.error_message());
+                }
+            }
+            return;
+        }
+
+        std::unordered_set<int64_t> returned_request_ids;
+        std::unordered_set<int64_t> error_request_ids;
+        for (const auto& error : dp_response.errors()) {
+            addBatchError(
+                response, error.request_id(), error.error_info().error_code(), error.error_info().error_message());
+            returned_request_ids.insert(error.request_id());
+            error_request_ids.insert(error.request_id());
+        }
+        for (const auto& success : dp_response.successes()) {
+            if (error_request_ids.find(success.request_id()) != error_request_ids.end()) {
+                continue;
+            }
+            addBatchSuccess(response, success.request_id());
+            returned_request_ids.insert(success.request_id());
+        }
+        for (const auto& dp_input : dp_request.requests()) {
+            if (!dp_input.has_input()) {
+                continue;
+            }
+            const auto request_id = dp_input.input().request_id();
+            if (returned_request_ids.find(request_id) == returned_request_ids.end()) {
+                addBatchError(
+                    response, request_id, grpc::StatusCode::INTERNAL, "EnqueueGroup missing result for request");
+            }
+        }
+    };
+
+    collectFutures(
+        dispatch_futures,
+        dispatch_deadline,
+        [&](size_t i) {
+            auto result = dispatch_futures[i].get();
+            merge_response(dispatch_targets[i].request, result.status, result.dp_response);
+        },
+        [&](size_t i) {
+            merge_response(dispatch_targets[i].request,
+                           grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                        "EnqueueBatch dispatch timeout for dp_rank "
+                                            + std::to_string(dispatch_targets[i].dp_rank)),
+                           EnqueueBatchResponsePB());
+            for (const auto& dp_input : dispatch_targets[i].request.requests()) {
+                if (dp_input.has_input()) {
+                    auto entry = response_registry_.get(dp_input.input().request_id());
+                    cancelResponseEntry(entry);
+                }
+            }
+        });
+    detachLeftoverFutures(dispatch_futures);
+
+    response_registry_.gc(std::chrono::minutes(10));
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context,
+                                            const EnqueueGroupRequestPB* request,
+                                            EnqueueBatchResponsePB*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
+    response->set_batch_id(request->batch_id());
+
     struct LocalSlot {
-        int                                       index = 0;
         std::shared_ptr<GenerateInputPB>          input;
         std::shared_ptr<ResponseBufferEntry>      entry;
         std::shared_ptr<RPCContext>               rpc_context;
         std::shared_ptr<PrefillGenerateContext>   prefill_context;
         std::shared_ptr<AsyncProducerCancelState> cancel_state;
         AtomicGuardPtr                            request_guard;
-        int64_t                                   request_id = 0;
+        int64_t                                   request_id   = 0;
+        bool                                      prepared     = false;
+        grpc::Status                              stage_status = grpc::Status::OK;
     };
 
-    auto cancel_reserved_slots = [this](std::vector<LocalSlot>& slots) {
-        for (auto& slot : slots) {
+    std::vector<const GenerateInputPB*> all_inputs;
+    all_inputs.reserve(request->requests_size());
+    std::unordered_set<int64_t> seen_request_ids;
+    bool                        duplicate_request_id = false;
+    for (const auto& dp_input : request->requests()) {
+        if (!dp_input.has_input()) {
+            addBatchError(response,
+                          /*request_id=*/0,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "EnqueueGroup request missing input");
+            continue;
+        }
+        all_inputs.push_back(&dp_input.input());
+        if (!seen_request_ids.insert(dp_input.input().request_id()).second) {
+            duplicate_request_id = true;
+        }
+    }
+
+    response->mutable_successes()->Reserve(static_cast<int>(all_inputs.size()));
+    response->mutable_errors()->Reserve(static_cast<int>(all_inputs.size()));
+
+    auto add_error_for_all = [&](int64_t code, const std::string& message) {
+        for (const auto* input : all_inputs) {
+            addBatchError(response, input->request_id(), code, message);
+        }
+    };
+
+    const int local_dp_rank = static_cast<int>(maga_init_params_.parallelism_config.dp_rank);
+    if (request->dp_rank() != local_dp_rank) {
+        add_error_for_all(grpc::StatusCode::INVALID_ARGUMENT,
+                          "EnqueueGroup dp_rank mismatch, request dp_rank " + std::to_string(request->dp_rank())
+                              + ", local dp_rank " + std::to_string(local_dp_rank));
+        return grpc::Status::OK;
+    }
+    if (duplicate_request_id) {
+        response->clear_errors();
+        add_error_for_all(grpc::StatusCode::ALREADY_EXISTS, "duplicate request_id in EnqueueGroup");
+        return grpc::Status::OK;
+    }
+    if (context && context->IsCancelled()) {
+        add_error_for_all(grpc::StatusCode::CANCELLED, "EnqueueGroup cancelled by caller");
+        return grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup cancelled by caller");
+    }
+
+    std::vector<LocalSlot> slots;
+    slots.reserve(all_inputs.size());
+    const int group_size = static_cast<int>(all_inputs.size());
+    for (const auto* input : all_inputs) {
+        auto input_copy = std::make_shared<GenerateInputPB>(*input);
+        input_copy->set_group_size(group_size);
+        input_copy->mutable_group_id()->set_value(request->batch_id());
+
+        auto entry = response_registry_.reserve(input_copy->request_id());
+        if (!entry) {
+            addBatchError(
+                response, input_copy->request_id(), grpc::StatusCode::ALREADY_EXISTS, "request already enqueued");
+            continue;
+        }
+        slots.push_back({input_copy, entry, nullptr, nullptr, nullptr, nullptr, input_copy->request_id()});
+    }
+
+    if (slots.empty()) {
+        return grpc::Status::OK;
+    }
+
+    for (const auto& slot : slots) {
+        int64_t batch_id = (slot.input && slot.input->has_group_id()) ? slot.input->group_id().value() : -1;
+        RTP_LLM_LOG_DEBUG("request [%ld] EnqueueGroup: has_group_id=%d, batch_id=%ld, request_batch_id=%ld",
+                          slot.request_id,
+                          slot.input ? slot.input->has_group_id() : 0,
+                          batch_id,
+                          request->batch_id());
+        meta_->enqueuePending(slot.request_id, slot.input ? slot.input->token_ids_size() : 0, batch_id);
+    }
+
+    auto erase_reserved_slots = [this](const std::vector<LocalSlot>& slots) {
+        for (const auto& slot : slots) {
             cancelResponseEntry(slot.entry);
             response_registry_.erase(slot.request_id);
         }
     };
-    auto abort_batch = [&](int64_t code, const std::string& message, std::vector<LocalSlot>& slots) {
-        for (int i = 0; i < input_count; ++i) {
-            auto* ack = response->mutable_acks(i);
-            ack->set_request_id(request->inputs(i).request_id());
-            if (!ack->has_error_info()) {
-                setBatchAckError(ack, ack->request_id(), code, message);
-            }
-        }
-        cancel_reserved_slots(slots);
-    };
-    auto abort_if_context_cancelled = [&](int index, int64_t request_id, std::vector<LocalSlot>& slots) {
-        if (!(context && context->IsCancelled())) {
-            return false;
-        }
-        setBatchAckError(
-            response->mutable_acks(index), request_id, grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-        abort_batch(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller", slots);
-        return true;
-    };
-    auto abort_if_entry_cancelled = [&](int index, int64_t request_id, std::vector<LocalSlot>& slots) {
-        auto entry = response_registry_.get(request_id);
-        if (entry && !entry->cancelled.load()) {
-            return false;
-        }
-        setBatchAckError(
-            response->mutable_acks(index), request_id, grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        abort_batch(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled", slots);
-        return true;
+
+    auto finish_pending_before_ack = [this](const LocalSlot& slot, const grpc::Status& status) {
+        meta_->finishTask(slot.request_id,
+                          slot.input ? slot.input->token_ids_size() : 0,
+                          /*prefix_length=*/0,
+                          status.ok() ? 0 : static_cast<int64_t>(status.error_code()),
+                          status.ok() ? "" : std::string(status.error_message()));
     };
 
-    std::unordered_set<int64_t> seen_request_ids;
-    std::vector<LocalSlot>      local_slots;
-    local_slots.reserve(input_count);
-
-    try {
-        for (int i = 0; i < input_count; ++i) {
-            const auto& input      = request->inputs(i);
-            const auto  request_id = input.request_id();
-            auto*       ack        = response->mutable_acks(i);
-            ack->set_request_id(request_id);
-
-            if (abort_if_context_cancelled(i, request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-            }
-
-            if (!seen_request_ids.insert(request_id).second) {
-                setBatchAckError(
-                    ack, request_id, grpc::StatusCode::ALREADY_EXISTS, "duplicate request_id in BatchEnqueue");
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            }
-
-            auto input_copy = std::make_shared<GenerateInputPB>(input);
-            auto entry      = response_registry_.reserve(request_id);
-            if (!entry) {
-                setBatchAckError(ack, request_id, grpc::StatusCode::ALREADY_EXISTS, "request already enqueued");
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            }
-
-            local_slots.push_back({i, input_copy, entry, nullptr, nullptr, nullptr, nullptr, request_id});
-            if (abort_if_entry_cancelled(i, request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-            }
+    if (!tryStartAsyncResponseWorker()) {
+        auto status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "EnqueueGroup server is stopping");
+        for (const auto& slot : slots) {
+            finish_pending_before_ack(slot, status);
+            addBatchError(response, slot.request_id, status.error_code(), status.error_message());
         }
-    } catch (const std::exception& e) {
-        abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted: " + std::string(e.what()), local_slots);
-        return grpc::Status::OK;
-    } catch (...) {
-        abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted: unknown exception", local_slots);
+        erase_reserved_slots(slots);
         return grpc::Status::OK;
     }
 
-    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
-    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
+    std::vector<int64_t> accepted_request_ids;
+    accepted_request_ids.reserve(slots.size());
+    for (const auto& slot : slots) {
+        accepted_request_ids.push_back(slot.request_id);
+    }
 
+    auto slots_ptr = std::make_shared<std::vector<LocalSlot>>(std::move(slots));
     try {
-        for (auto& slot : local_slots) {
-            if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-            }
-            if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-            }
+        std::thread worker([this,
+                            slots_ptr,
+                            max_retry_times          = maga_init_params_.pd_sep_config.prefill_retry_times,
+                            max_retry_timeout_ms     = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms,
+                            batch_prepare_timeout_ms = maga_init_params_.pd_sep_config.batch_prepare_timeout_ms,
+                            batch_load_timeout_ms = maga_init_params_.pd_sep_config.batch_load_timeout_ms]() mutable {
+            ScopeExit controller_finish_guard([this] { finishAsyncResponseWorker(); });
+            auto&     slots = *slots_ptr;
 
-            auto& input_copy                = slot.input;
-            auto  rpc_ctx                   = std::make_shared<RPCContext>(RPCContext{input_copy.get(), nullptr});
-            auto  pfx_ctx                   = std::make_shared<PrefillGenerateContext>(&this->resource(),
-                                                                    *rpc_ctx,
-                                                                    input_copy->generate_config().timeout_ms(),
-                                                                    /*server_context=*/nullptr,
-                                                                    metrics_reporter_,
-                                                                    meta_);
-            pfx_ctx->onflight_requests      = onflight_requests_;
-            pfx_ctx->loading_cache_requests = loading_cache_requests_;
-            auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
-            auto cancel_state               = std::make_shared<AsyncProducerCancelState>();
-            {
-                std::lock_guard<std::mutex> lock(slot.entry->mu);
-                cancel_state->cancelled.store(slot.entry->cancelled.load());
-                slot.entry->cancel_producer = makeAsyncProducerCancelCallback(cancel_state);
-            }
-
-            slot.rpc_context              = rpc_ctx;
-            slot.prefill_context          = pfx_ctx;
-            slot.cancel_state             = cancel_state;
-            slot.request_guard            = guard;
-            pfx_ctx->refresh_cancel_state = [cancel_state](const std::shared_ptr<grpc::ClientContext>& client_context,
-                                                           const std::shared_ptr<GenerateStream>&      stream) {
-                refreshAsyncProducerCancelState(cancel_state, client_context, stream);
+            auto entry_cancelled = [](const LocalSlot& slot) { return !slot.entry || slot.entry->cancelled.load(); };
+            auto grpc_status_to_stream_error = [](const grpc::Status& status) {
+                return status.error_code() == grpc::StatusCode::CANCELLED ? ErrorCode::CANCELLED :
+                                                                            ErrorCode::UNKNOWN_ERROR;
+            };
+            auto fail_slot = [&](LocalSlot& slot, const grpc::Status& status) {
+                int64_t input_length  = slot.input ? slot.input->token_ids_size() : 0;
+                int64_t prefix_length = 0;
+                if (slot.prefill_context && slot.prefill_context->getStream()) {
+                    auto stream   = slot.prefill_context->getStream();
+                    input_length  = stream->inputLength();
+                    prefix_length = stream->prefixLength();
+                    if (!stream->hasError()) {
+                        stream->reportError(grpc_status_to_stream_error(status), std::string(status.error_message()));
+                    }
+                }
+                meta_->finishTask(slot.request_id,
+                                  input_length,
+                                  prefix_length,
+                                  status.ok() ? 0 : static_cast<int64_t>(status.error_code()),
+                                  status.ok() ? "" : std::string(status.error_message()));
+                markResponseEntryDone(slot.entry, status);
+                slot.prefill_context.reset();
+                slot.rpc_context.reset();
+                slot.request_guard.reset();
+                slot.cancel_state.reset();
+                slot.input.reset();
+                slot.entry.reset();
             };
 
-            if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-            }
+            auto start_finish_worker = [&](LocalSlot& slot) {
+                auto entry                               = slot.entry;
+                auto writer                              = std::make_shared<ResponseBufferWriter>(entry);
+                slot.prefill_context->rpc_context.writer = writer.get();
 
-            bool alloc_ok = false;
-            try {
-                int64_t begin_time_us = currentTimeUs();
-                auto    stage         = pfx_ctx->stat_info.saveStage();
-                for (int attempt = 0; attempt <= max_retry_times; ++attempt) {
-                    if (context && context->IsCancelled()) {
-                        break;
-                    }
-                    if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                        return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-                    }
-                    pfx_ctx->reset();
-                    pfx_ctx->stat_info.restoreStage(stage);
-                    pfx_ctx->retry_times++;
-                    prepareAllocateResource(*pfx_ctx);
-                    if (context && context->IsCancelled()) {
-                        break;
-                    }
-                    if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                        return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-                    }
-                    if (pfx_ctx->ok()) {
-                        alloc_ok = true;
-                        break;
-                    }
-                    auto cost_time_us           = currentTimeUs() - begin_time_us;
-                    pfx_ctx->retry_cost_time_ms = cost_time_us / 1000;
-                    if (max_retry_timeout_ms > 0 && cost_time_us >= max_retry_timeout_ms * 1000) {
-                        break;
-                    }
-                    usleep(1000);
+                if (!tryStartAsyncResponseWorker()) {
+                    fail_slot(slot, grpc::Status(grpc::StatusCode::UNAVAILABLE, "EnqueueGroup server is stopping"));
+                    return;
                 }
-            } catch (const std::exception& e) {
-                setBatchAckError(response->mutable_acks(slot.index),
-                                 slot.request_id,
-                                 grpc::StatusCode::INTERNAL,
-                                 "prepareAllocateResource exception: " + std::string(e.what()));
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            } catch (...) {
-                setBatchAckError(response->mutable_acks(slot.index),
-                                 slot.request_id,
-                                 grpc::StatusCode::INTERNAL,
-                                 "prepareAllocateResource unknown exception");
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            }
 
-            refreshAsyncProducerCancelState(slot.cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
-            if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-            }
-            if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-            }
-
-            if (!alloc_ok) {
-                setBatchAckError(response->mutable_acks(slot.index),
-                                 slot.request_id,
-                                 grpc::StatusCode::INTERNAL,
-                                 pfx_ctx->error_info.ToString());
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            }
-
-            pfx_ctx->stat_info.nextStage();
-            enqueueRequest(*pfx_ctx);
-            refreshAsyncProducerCancelState(slot.cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
-            if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-            }
-            if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-            }
-            if (pfx_ctx->hasError()) {
-                setBatchAckError(response->mutable_acks(slot.index),
-                                 slot.request_id,
-                                 grpc::StatusCode::INTERNAL,
-                                 pfx_ctx->error_info.ToString());
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            }
-        }
-
-        for (auto& slot : local_slots) {
-            auto* ack     = response->mutable_acks(slot.index);
-            auto& pfx_ctx = slot.prefill_context;
-
-            if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-            }
-            if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-            }
-
-            pfx_ctx->stat_info.nextStage();
-            remoteLoadCacheStart(*pfx_ctx);
-            refreshAsyncProducerCancelState(slot.cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
-            if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-            }
-            if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-            }
-            if (pfx_ctx->hasError()) {
-                setBatchAckError(ack, slot.request_id, grpc::StatusCode::INTERNAL, pfx_ctx->error_info.ToString());
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            }
-
-            auto entry                  = slot.entry;
-            auto writer                 = std::make_shared<ResponseBufferWriter>(entry);
-            pfx_ctx->rpc_context.writer = writer.get();
-
-            if (!tryStartAsyncResponseWorker()) {
-                setBatchAckError(
-                    ack, slot.request_id, grpc::StatusCode::UNAVAILABLE, "BatchEnqueue server is stopping");
-                abort_batch(grpc::StatusCode::UNAVAILABLE, "BatchEnqueue server is stopping", local_slots);
-                return grpc::Status(grpc::StatusCode::UNAVAILABLE, "BatchEnqueue server is stopping");
-            }
-
-            try {
-                std::thread worker([this,
-                                    pfx_ctx = slot.prefill_context,
-                                    rpc_ctx = slot.rpc_context,
-                                    input   = slot.input,
-                                    writer,
-                                    entry,
-                                    guard      = slot.request_guard,
-                                    request_id = slot.request_id]() mutable {
-                    (void)rpc_ctx;
-                    (void)input;
-                    (void)writer;
-                    (void)guard;
-                    ScopeExit    worker_finish_guard([this] { finishAsyncResponseWorker(); });
-                    ScopeExit    release_captures_guard([&] {
-                        pfx_ctx.reset();
-                        rpc_ctx.reset();
-                        input.reset();
-                        writer.reset();
-                        entry.reset();
-                        guard.reset();
+                try {
+                    std::thread finish_worker([this,
+                                               pfx_ctx = slot.prefill_context,
+                                               rpc_ctx = slot.rpc_context,
+                                               input   = slot.input,
+                                               writer,
+                                               entry,
+                                               guard        = slot.request_guard,
+                                               cancel_state = slot.cancel_state,
+                                               request_id   = slot.request_id]() mutable {
+                        (void)rpc_ctx;
+                        (void)input;
+                        (void)writer;
+                        (void)guard;
+                        (void)cancel_state;
+                        ScopeExit    worker_finish_guard([this] { finishAsyncResponseWorker(); });
+                        ScopeExit    release_captures_guard([&] {
+                            pfx_ctx.reset();
+                            rpc_ctx.reset();
+                            input.reset();
+                            writer.reset();
+                            entry.reset();
+                            guard.reset();
+                            cancel_state.reset();
+                        });
+                        grpc::Status finish_status;
+                        try {
+                            finish_status = finishStream(*pfx_ctx);
+                            RTP_LLM_LOG_DEBUG("request [%ld] finishStream returned, ok=%d, has_stream=%d",
+                                              request_id,
+                                              finish_status.ok(),
+                                              pfx_ctx->getStream() ? 1 : 0);
+                            // Record finished task for FlexLB calibration
+                            if (finish_status.ok() && pfx_ctx->getStream()) {
+                                RTP_LLM_LOG_DEBUG("request [%ld] calling dequeue for FlexLB calibration", request_id);
+                                meta_->dequeue(request_id, pfx_ctx->getStream());
+                            } else if (!finish_status.ok()) {
+                                RTP_LLM_LOG_DEBUG("request [%ld] calling finishTask due to error, code=%d, msg=%s",
+                                                  request_id,
+                                                  static_cast<int>(finish_status.error_code()),
+                                                  finish_status.error_message().c_str());
+                                meta_->finishTask(request_id,
+                                                  input ? input->token_ids_size() : 0,
+                                                  /*prefix_length=*/0,
+                                                  static_cast<int64_t>(finish_status.error_code()),
+                                                  finish_status.error_message());
+                            }
+                        } catch (const std::exception& e) {
+                            auto error_msg =
+                                "request [" + pfx_ctx->request_key + "] finishStream exception [" + e.what() + "]";
+                            finish_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+                            meta_->finishTask(request_id,
+                                              input ? input->token_ids_size() : 0,
+                                              /*prefix_length=*/0,
+                                              static_cast<int64_t>(finish_status.error_code()),
+                                              error_msg);
+                        } catch (...) {
+                            finish_status = grpc::Status(grpc::StatusCode::INTERNAL, "finishStream unknown exception");
+                            meta_->finishTask(request_id,
+                                              input ? input->token_ids_size() : 0,
+                                              /*prefix_length=*/0,
+                                              static_cast<int64_t>(finish_status.error_code()),
+                                              "finishStream unknown exception");
+                        }
+                        markResponseEntryDone(entry, finish_status);
+                        RTP_LLM_LOG_DEBUG(
+                            "EnqueueGroup request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
                     });
-                    grpc::Status finish_status;
-                    try {
-                        finish_status = finishStream(*pfx_ctx);
-                    } catch (const std::exception& e) {
-                        auto error_msg =
-                            "request [" + pfx_ctx->request_key + "] finishStream exception [" + e.what() + "]";
-                        finish_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-                    } catch (...) {
-                        finish_status = grpc::Status(grpc::StatusCode::INTERNAL, "finishStream unknown exception");
-                    }
-                    if (!finish_status.ok()) {
-                        std::lock_guard<std::mutex> lock(entry->mu);
-                        entry->error_status = finish_status;
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(entry->mu);
-                        entry->done.store(true);
-                        entry->last_activity_us = currentTimeUs();
-                        entry->cancel_producer  = nullptr;
-                    }
-                    entry->cv.notify_all();
-                    RTP_LLM_LOG_DEBUG(
-                        "BatchEnqueue request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
-                });
-                worker.detach();
-            } catch (const std::exception& e) {
-                finishAsyncResponseWorker();
-                setBatchAckError(ack,
-                                 slot.request_id,
-                                 grpc::StatusCode::INTERNAL,
-                                 "start async response worker exception: " + std::string(e.what()));
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
-            } catch (...) {
-                finishAsyncResponseWorker();
-                setBatchAckError(
-                    ack, slot.request_id, grpc::StatusCode::INTERNAL, "start async response worker unknown exception");
-                abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-                return grpc::Status::OK;
+                    finish_worker.detach();
+                } catch (const std::exception& e) {
+                    finishAsyncResponseWorker();
+                    fail_slot(slot,
+                              grpc::Status(grpc::StatusCode::INTERNAL,
+                                           "start async response worker exception: " + std::string(e.what())));
+                } catch (...) {
+                    finishAsyncResponseWorker();
+                    fail_slot(
+                        slot,
+                        grpc::Status(grpc::StatusCode::INTERNAL, "start async response worker unknown exception"));
+                }
+            };
+
+            for (auto& slot : slots) {
+                auto rpc_ctx                    = std::make_shared<RPCContext>(RPCContext{slot.input.get(), nullptr});
+                auto pfx_ctx                    = std::make_shared<PrefillGenerateContext>(&this->resource(),
+                                                                        *rpc_ctx,
+                                                                        slot.input->generate_config().timeout_ms(),
+                                                                        /*server_context=*/nullptr,
+                                                                        metrics_reporter_,
+                                                                        meta_);
+                pfx_ctx->onflight_requests      = onflight_requests_;
+                pfx_ctx->loading_cache_requests = loading_cache_requests_;
+                auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
+                auto cancel_state               = std::make_shared<AsyncProducerCancelState>();
+                {
+                    std::lock_guard<std::mutex> lock(slot.entry->mu);
+                    cancel_state->cancelled.store(slot.entry->cancelled.load());
+                    slot.entry->cancel_producer = makeAsyncProducerCancelCallback(cancel_state);
+                }
+                slot.rpc_context     = rpc_ctx;
+                slot.prefill_context = pfx_ctx;
+                slot.cancel_state    = cancel_state;
+                slot.request_guard   = guard;
+                pfx_ctx->refresh_cancel_state =
+                    [cancel_state](const std::shared_ptr<grpc::ClientContext>& client_context,
+                                   const std::shared_ptr<GenerateStream>&      stream) {
+                        refreshAsyncProducerCancelState(cancel_state, client_context, stream);
+                    };
             }
-        }
+
+            const auto prepare_deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(batch_prepare_timeout_ms);
+            std::vector<std::future<void>> prepare_futures;
+            prepare_futures.reserve(slots.size());
+            for (auto& slot : slots) {
+                auto* slot_ptr = &slot;
+                prepare_futures.push_back(std::async(
+                    std::launch::async, [this, slot_ptr, entry_cancelled, max_retry_times, max_retry_timeout_ms] {
+                        auto& slot = *slot_ptr;
+                        if (entry_cancelled(slot)) {
+                            slot.stage_status =
+                                grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled");
+                            return;
+                        }
+                        try {
+                            int64_t begin_time_us = currentTimeUs();
+                            auto    stage         = slot.prefill_context->stat_info.saveStage();
+                            for (int attempt = 0; attempt <= max_retry_times; ++attempt) {
+                                if (entry_cancelled(slot)) {
+                                    slot.stage_status =
+                                        grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled");
+                                    return;
+                                }
+                                slot.prefill_context->reset();
+                                slot.prefill_context->stat_info.restoreStage(stage);
+                                slot.prefill_context->retry_times++;
+                                prepareAllocateResource(*slot.prefill_context);
+                                if (slot.prefill_context->ok()) {
+                                    slot.prepared = true;
+                                    return;
+                                }
+                                auto cost_time_us                        = currentTimeUs() - begin_time_us;
+                                slot.prefill_context->retry_cost_time_ms = cost_time_us / 1000;
+                                if (max_retry_timeout_ms > 0 && cost_time_us >= max_retry_timeout_ms * 1000) {
+                                    break;
+                                }
+                                usleep(1000);
+                            }
+                            slot.stage_status = slot.prefill_context->error_status.ok() ?
+                                                    statusFromErrorInfo(slot.prefill_context->error_info) :
+                                                    slot.prefill_context->error_status;
+                            if (slot.stage_status.ok()) {
+                                slot.stage_status =
+                                    grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
+                            }
+                        } catch (const std::exception& e) {
+                            slot.stage_status =
+                                grpc::Status(grpc::StatusCode::INTERNAL,
+                                             "prepareAllocateResource exception: " + std::string(e.what()));
+                        } catch (...) {
+                            slot.stage_status =
+                                grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource unknown exception");
+                        }
+                    }));
+            }
+            collectFutures(
+                prepare_futures,
+                prepare_deadline,
+                [&](size_t i) { prepare_futures[i].get(); },
+                [&](size_t i) {
+                    cancelResponseEntry(slots[i].entry);
+                    slots[i].stage_status =
+                        grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup prepare timeout");
+                });
+            drainReadyFutures(prepare_futures, std::chrono::milliseconds(2000));
+            detachLeftoverFutures(prepare_futures);
+
+            std::vector<LocalSlot*> ready_slots;
+            ready_slots.reserve(slots.size());
+            for (auto& slot : slots) {
+                if (entry_cancelled(slot)) {
+                    fail_slot(slot, grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled"));
+                } else if (!slot.prepared) {
+                    fail_slot(slot, slot.stage_status);
+                } else {
+                    ready_slots.push_back(&slot);
+                }
+            }
+            if (ready_slots.empty()) {
+                return;
+            }
+
+            const int                                   local_group_size = static_cast<int>(ready_slots.size());
+            std::vector<std::shared_ptr<GenerateInput>> generate_inputs;
+            generate_inputs.reserve(ready_slots.size());
+            for (auto* slot : ready_slots) {
+                slot->input->set_group_size(local_group_size);
+                slot->prefill_context->generate_input->group_size = local_group_size;
+                slot->prefill_context->stat_info.nextStage();
+                generate_inputs.push_back(slot->prefill_context->generate_input);
+            }
+
+            std::vector<GenerateStreamPtr> streams;
+            try {
+                streams = engine_->enqueueMultiple(generate_inputs);
+            } catch (const std::exception& e) {
+                for (auto* slot : ready_slots) {
+                    fail_slot(*slot,
+                              grpc::Status(grpc::StatusCode::INTERNAL,
+                                           "enqueueMultiple exception: " + std::string(e.what())));
+                }
+                return;
+            } catch (...) {
+                for (auto* slot : ready_slots) {
+                    fail_slot(*slot, grpc::Status(grpc::StatusCode::INTERNAL, "enqueueMultiple unknown exception"));
+                }
+                return;
+            }
+
+            std::unordered_map<int64_t, GenerateStreamPtr> stream_by_id;
+            for (auto& stream : streams) {
+                if (stream) {
+                    stream_by_id[stream->streamId()] = stream;
+                }
+            }
+            std::vector<LocalSlot*> stream_ready_slots;
+            stream_ready_slots.reserve(ready_slots.size());
+            for (auto* slot : ready_slots) {
+                auto it = stream_by_id.find(slot->request_id);
+                if (it == stream_by_id.end()) {
+                    fail_slot(*slot, grpc::Status(grpc::StatusCode::INTERNAL, "EnqueueGroup stream not enqueued"));
+                    continue;
+                }
+                slot->prefill_context->setStream(it->second);
+                refreshAsyncProducerCancelState(
+                    slot->cancel_state, slot->prefill_context->client_context, slot->prefill_context->getStream());
+                stream_ready_slots.push_back(slot);
+            }
+
+            const auto load_deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(batch_load_timeout_ms);
+            std::vector<std::future<void>> load_futures;
+            load_futures.reserve(stream_ready_slots.size());
+            for (auto* slot : stream_ready_slots) {
+                load_futures.push_back(
+                    std::async(std::launch::async, [this, slot, entry_cancelled, fail_slot, start_finish_worker] {
+                        if (entry_cancelled(*slot)) {
+                            fail_slot(*slot,
+                                      grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled"));
+                            return;
+                        }
+                        try {
+                            slot->prefill_context->stat_info.nextStage();
+                            remoteLoadCacheStart(*slot->prefill_context);
+                            refreshAsyncProducerCancelState(slot->cancel_state,
+                                                            slot->prefill_context->client_context,
+                                                            slot->prefill_context->getStream());
+                            if (entry_cancelled(*slot)) {
+                                fail_slot(*slot,
+                                          grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled"));
+                                return;
+                            }
+                            if (slot->prefill_context->hasError()) {
+                                auto status = slot->prefill_context->error_status.ok() ?
+                                                  statusFromErrorInfo(slot->prefill_context->error_info) :
+                                                  slot->prefill_context->error_status;
+                                fail_slot(*slot, status);
+                                return;
+                            }
+                            start_finish_worker(*slot);
+                        } catch (const std::exception& e) {
+                            fail_slot(*slot,
+                                      grpc::Status(grpc::StatusCode::INTERNAL,
+                                                   "remoteLoadCacheStart exception: " + std::string(e.what())));
+                        } catch (...) {
+                            fail_slot(
+                                *slot,
+                                grpc::Status(grpc::StatusCode::INTERNAL, "remoteLoadCacheStart unknown exception"));
+                        }
+                    }));
+            }
+            collectFutures(
+                load_futures,
+                load_deadline,
+                [&](size_t i) { load_futures[i].get(); },
+                [&](size_t i) { cancelResponseEntry(stream_ready_slots[i]->entry); });
+            drainReadyFutures(load_futures, std::chrono::milliseconds(2000));
+            detachLeftoverFutures(load_futures);
+        });
+        worker.detach();
     } catch (const std::exception& e) {
-        abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted: " + std::string(e.what()), local_slots);
+        finishAsyncResponseWorker();
+        auto status = grpc::Status(grpc::StatusCode::INTERNAL,
+                                   "start EnqueueGroup accept worker exception: " + std::string(e.what()));
+        for (const auto& slot : *slots_ptr) {
+            finish_pending_before_ack(slot, status);
+            addBatchError(response, slot.request_id, status.error_code(), status.error_message());
+        }
+        erase_reserved_slots(*slots_ptr);
         return grpc::Status::OK;
     } catch (...) {
-        abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted: unknown exception", local_slots);
+        finishAsyncResponseWorker();
+        auto status = grpc::Status(grpc::StatusCode::INTERNAL, "start EnqueueGroup accept worker unknown exception");
+        for (const auto& slot : *slots_ptr) {
+            finish_pending_before_ack(slot, status);
+            addBatchError(response, slot.request_id, status.error_code(), status.error_message());
+        }
+        erase_reserved_slots(*slots_ptr);
         return grpc::Status::OK;
     }
 
-    response_registry_.gc(std::chrono::minutes(10));
-
+    for (const auto request_id : accepted_request_ids) {
+        addBatchSuccess(response, request_id);
+    }
     return grpc::Status::OK;
 }
 

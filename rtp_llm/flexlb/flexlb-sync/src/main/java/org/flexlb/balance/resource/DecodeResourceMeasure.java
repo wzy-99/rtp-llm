@@ -1,15 +1,14 @@
 package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.springframework.stereotype.Component;
 
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Decode role resource measure
@@ -56,6 +55,25 @@ public class DecodeResourceMeasure implements ResourceMeasure {
 
         long usagePercentage = (long) ((used * 100.0) / total);
         return workerStatus.updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
+    }
+
+    @Override
+    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
+        if (endpoint == null || !endpoint.getStatus().isAlive()) {
+            return false;
+        }
+        if (isConcurrencyLimitReached(endpoint)) {
+            return false;
+        }
+        long used = endpoint.getStatus().getUsedKvCacheTokens().get();
+        long available = endpoint.getStatus().getAvailableKvCacheTokens().get();
+        long total = used + available;
+        if (total == 0) {
+            endpoint.getStatus().getResourceAvailable().set(true);
+            return true;
+        }
+        long usagePercentage = (long) ((used * 100.0) / total);
+        return endpoint.getStatus().updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
     }
 
     @Override
@@ -126,19 +144,21 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         return concurrencyLimit > 0 && calculateDecodeConcurrency(workerStatus) >= concurrencyLimit;
     }
 
+    private boolean isConcurrencyLimitReached(WorkerEndpoint endpoint) {
+        return concurrencyLimit > 0 && calculateDecodeConcurrency(endpoint) >= concurrencyLimit;
+    }
+
     private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
-        Set<String> requestIds = new HashSet<>();
-        if (MapUtils.isNotEmpty(workerStatus.getWaitingTaskList())) {
-            requestIds.addAll(workerStatus.getWaitingTaskList().keySet());
-        }
         if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
-            requestIds.addAll(workerStatus.getRunningTaskList().keySet());
+            return workerStatus.getRunningTaskList().size();
         }
-        if (MapUtils.isNotEmpty(workerStatus.getLocalTaskMap())) {
-            workerStatus.getLocalTaskMap().keySet().stream()
-                    .map(String::valueOf)
-                    .forEach(requestIds::add);
+        return 0;
+    }
+
+    private long calculateDecodeConcurrency(WorkerEndpoint endpoint) {
+        if (MapUtils.isNotEmpty(endpoint.getStatus().getRunningTaskList())) {
+            return endpoint.getStatus().getRunningTaskList().size();
         }
-        return requestIds.size();
+        return 0;
     }
 }

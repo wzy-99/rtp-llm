@@ -28,7 +28,10 @@ public:
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
     grpc::Status
-    BatchEnqueue(grpc::ServerContext* context, const BatchEnqueueRequestPB* request, BatchEnqueueResponsePB* response);
+    EnqueueBatch(grpc::ServerContext* context, const EnqueueBatchRequestPB* request, EnqueueBatchResponsePB* response);
+
+    grpc::Status
+    EnqueueGroup(grpc::ServerContext* context, const EnqueueGroupRequestPB* request, EnqueueBatchResponsePB* response);
 
     grpc::Status FetchResponse(grpc::ServerContext*                   context,
                                const FetchRequestPB*                  request,
@@ -56,6 +59,7 @@ private:
     bool         tryStartAsyncResponseWorker();
     void         finishAsyncResponseWorker();
     void         stopAsyncResponseWorkers();
+    std::string  batchTargetAddrForDpRank(int dp_rank) const;
 
 private:
     std::string                           decode_cluster_name_;

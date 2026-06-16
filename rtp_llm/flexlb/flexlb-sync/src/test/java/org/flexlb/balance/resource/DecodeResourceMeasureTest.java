@@ -38,9 +38,7 @@ class DecodeResourceMeasureTest {
         config.setDecodeConcurrencyLimit(0);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveDecodeWorker();
-        worker.setWaitingTaskList(taskMap(1L, 2L));
-        worker.setRunningTaskList(taskMap(3L, 4L));
-        worker.getLocalTaskMap().put(5L, taskInfo(5L));
+        worker.setRunningTaskList(taskMap(1L, 2L, 3L, 4L));
 
         assertTrue(measure.isResourceAvailable(worker));
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
@@ -51,21 +49,9 @@ class DecodeResourceMeasureTest {
         config.setDecodeConcurrencyLimit(2);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveDecodeWorker();
-        worker.setRunningTaskList(taskMap(1L));
-        worker.getLocalTaskMap().put(2L, taskInfo(2L));
+        worker.setRunningTaskList(taskMap(1L, 2L));
 
         assertFalse(measure.isResourceAvailable(worker));
-    }
-
-    @Test
-    void concurrency_count_should_deduplicate_reported_and_local_request_ids() {
-        config.setDecodeConcurrencyLimit(2);
-        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
-        WorkerStatus worker = createAliveDecodeWorker();
-        worker.setRunningTaskList(taskMap(1L));
-        worker.getLocalTaskMap().put(1L, taskInfo(1L));
-
-        assertTrue(measure.isResourceAvailable(worker));
     }
 
     @Test
@@ -73,9 +59,7 @@ class DecodeResourceMeasureTest {
         config.setDecodeConcurrencyLimit(4);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveDecodeWorker();
-        worker.setWaitingTaskList(taskMap(1L));
-        worker.setRunningTaskList(taskMap(2L));
-        worker.getLocalTaskMap().put(3L, taskInfo(3L));
+        worker.setRunningTaskList(taskMap(1L, 2L, 3L));
 
         assertEquals(75.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
