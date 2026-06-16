@@ -31,8 +31,8 @@ _stub_package(
 )
 
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
-    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_batched_fp8_einsum_shapes,
+    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
     _collect_dsv4_fp8_mqa_logits_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
@@ -139,7 +139,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="RoleType.DECODE",
+                role_type_name="DECODE",
                 is_speculative=True,
                 gen_num_per_cycle=4,
             ),

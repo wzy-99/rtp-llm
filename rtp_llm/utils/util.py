@@ -308,19 +308,27 @@ async def _handle_response(response: aiohttp.ClientResponse) -> Dict[str, Any]:
         }
 
 
-def wait_sever_done(server_process, port: int, timeout: int = 1600):
+def wait_sever_done(
+    server_process, port: int, timeout: int = 1600, health_check_path: str = "/health"
+):
     host = "localhost"
     retry_interval = 1  # 重试间隔（秒）
     start_time = time.time()
 
     port = str(port)
+    health_check_path = health_check_path or "/health"
+    if not health_check_path.startswith("/"):
+        health_check_path = "/" + health_check_path
 
-    logging.info(f"等待pid[{server_process.pid}]启动中...\n端口 {port}")
+    logging.info(
+        f"等待pid[{server_process.pid}]启动中...\n端口 {port}, health path {health_check_path}"
+    )
     while True:
         try:
             # 使用 HTTP health check 检查服务是否准备就绪
             response = requests.get(
-                f"http://{host}:{port}/health", timeout=retry_interval
+                f"http://{host}:{port}{health_check_path}",
+                timeout=retry_interval,
             )
             logging.info(
                 f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
@@ -341,6 +349,7 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
         if not psutil.pid_exists(server_process.pid) or rc is not None:
             if rc is not None and rc < 0:
                 import signal as signal_mod
+
                 sig = -rc
                 try:
                     sig_name = signal_mod.Signals(sig).name
@@ -354,9 +363,7 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
                     f"Server pid={server_process.pid} exited with code {rc}"
                 )
             else:
-                logging.warning(
-                    f"Server pid={server_process.pid} no longer exists"
-                )
+                logging.warning(f"Server pid={server_process.pid} no longer exists")
             return False
         # 如果等待时间超过预设的超时时间，则放弃等待
         if time.time() - start_time > timeout:

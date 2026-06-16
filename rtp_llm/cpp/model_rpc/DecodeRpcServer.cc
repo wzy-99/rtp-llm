@@ -139,13 +139,14 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
-    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
-    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+    // Prepare KV cache allocation, then wait until the stream is ready.
+    // This busy-wait is safe because the stream has not been enqueued to the
+    // scheduler yet -- the gRPC thread exclusively drives the state machine.
+    generate_stream->prepare();
+    while (generate_stream->alive() && !generate_stream->isReady()) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
-    if (generate_stream->hasError()) {
+    if (!generate_stream->alive() || generate_stream->hasError()) {
         auto   stream_error = generate_stream->statusInfo();
         string error_msg    = stream_error.ToString();
         if (error_msg.empty()) {
@@ -783,17 +784,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             const size_t     data_bytes          = local_entries * kSwaTokenDataBytes;
             const size_t     scale_bytes         = local_entries * kSwaTokenScaleBytes;
             const size_t     data_offset         = data_bytes * static_cast<size_t>(peer_idx);
-            const size_t     scale_region_offset =
-                static_cast<size_t>(state_spec->entries_per_block) * kSwaTokenDataBytes;
-            const size_t scale_offset = scale_region_offset + scale_bytes * static_cast<size_t>(peer_idx);
-            RTP_LLM_CHECK_WITH_INFO(scale_offset + scale_bytes <= block.size_bytes,
-                                    "Dsv4 SWA_KV DATA/SCALE slice exceeds block bytes: data=[%zu,%zu) scale=[%zu,%zu) block=%zu gid=%zu",
-                                    data_offset,
-                                    data_offset + data_bytes,
-                                    scale_offset,
-                                    scale_offset + scale_bytes,
-                                    block.size_bytes,
-                                    gid);
+            const size_t scale_region_offset = static_cast<size_t>(state_spec->entries_per_block) * kSwaTokenDataBytes;
+            const size_t scale_offset        = scale_region_offset + scale_bytes * static_cast<size_t>(peer_idx);
+            RTP_LLM_CHECK_WITH_INFO(
+                scale_offset + scale_bytes <= block.size_bytes,
+                "Dsv4 SWA_KV DATA/SCALE slice exceeds block bytes: data=[%zu,%zu) scale=[%zu,%zu) block=%zu gid=%zu",
+                data_offset,
+                data_offset + data_bytes,
+                scale_offset,
+                scale_offset + scale_bytes,
+                block.size_bytes,
+                gid);
             BlockInfo data_block   = block;
             BlockInfo scale_block  = block;
             data_block.addr        = static_cast<void*>(static_cast<char*>(block.addr) + data_offset);
