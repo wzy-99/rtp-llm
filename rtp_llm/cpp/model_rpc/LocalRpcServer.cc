@@ -212,9 +212,6 @@ bool LocalRpcServer::applyTimelineGate(const std::string& request_key,
 grpc::Status
 LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
-                      context->peer().c_str(),
-                      request->latest_cache_version());
     KVCacheInfo cache_status = getCacheStatusInfo(request->latest_cache_version(), request->need_cache_keys());
     response->set_available_kv_cache(cache_status.available_kv_cache);
     response->set_total_kv_cache(cache_status.total_kv_cache);
@@ -233,15 +230,8 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     RTP_LLM_PROFILE_FUNCTION();
     int64_t request_begin_time_us   = currentTimeUs();
     int64_t latest_finished_version = request->latest_finished_version();
-    RTP_LLM_LOG_DEBUG(
-        "receive workerStatus rpc request from client: %s, latest_finished_version: %ld, config role_type: %d",
-        context->peer().c_str(),
-        latest_finished_version,
-        maga_init_params_.pd_sep_config.role_type);
 
-    WorkerStatusInfo status_info              = getWorkerStatusInfo(latest_finished_version);
-    int64_t          request_after_ws_time_us = currentTimeUs();
-    RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
+    WorkerStatusInfo status_info = getWorkerStatusInfo(latest_finished_version);
 
     const auto& engine_schedule_info = status_info.engine_schedule_info;
     response->set_role(static_cast<RoleTypePB>(status_info.role));
@@ -305,6 +295,8 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_dp_rank(status_info.dp_rank);
     auto kv_info = engine_->getCacheStatusInfo(-1, false);
     response->set_available_kv_cache(kv_info.available_kv_cache);
+    response->set_total_kv_cache(kv_info.total_kv_cache);
+    int64_t request_after_ws_time_us = currentTimeUs();
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }

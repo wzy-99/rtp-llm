@@ -784,7 +784,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             char buf[256];
             snprintf(buf,
                      sizeof(buf),
-                     "{id=%ld input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
+                     "{req_id=%ld input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
                      s->streamId(),
                      s->inputLength(),
                      s->prefixLength(),
@@ -870,10 +870,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (isTpRank0() && stream_groups.totalContextBatchSize() > 0) {
-        RTP_LLM_LOG_INFO("prefill_batch_end: ctx_batch=%zu total_tokens=%zu forward_us=%ld",
+        auto&   ctx_streams = stream_groups.contextStreams();
+        int64_t grp_id      = ctx_streams.empty() ? -1 : ctx_streams.front()->groupId();
+        int     grp_sz      = ctx_streams.empty() ? 0 : ctx_streams.front()->groupSize();
+        RTP_LLM_LOG_INFO("prefill_batch_end: ctx_batch=%zu total_tokens=%zu forward_us=%ld grp=%ld/%d",
                          stream_groups.totalContextBatchSize(),
                          stream_groups.modelExecuteTokenSize(),
-                         model_forward_us);
+                         model_forward_us,
+                         grp_id,
+                         grp_sz);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {

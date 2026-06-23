@@ -52,9 +52,6 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         }
         return_logits |= stream->returnLogits();
         calculate_softmax_probs |= stream->calculateSoftmaxProbs();
-        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
-                          stream->streamId(),
-                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
@@ -205,7 +202,7 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
         const auto stream_id = static_cast<uint64_t>(stream->streamId());
         if (score_batch) {
-            const int score_len = static_cast<int>(stream->scoreLen());
+            const int score_len     = static_cast<int>(stream->scoreLen());
             size_t    processor_idx = 0;
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
                 if (processor->isStateful()) {

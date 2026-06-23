@@ -196,7 +196,6 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
     batch_size_ = new_batch_size;
     setSeqLength(seq_length_ + num_new_tokens);
 
-    RTP_LLM_LOG_DEBUG("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());
     return true;
 }
 

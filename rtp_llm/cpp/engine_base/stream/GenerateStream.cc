@@ -981,7 +981,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
         return;
@@ -1204,7 +1203,7 @@ void GenerateStream::reportStreamMetrics() {
             collector.query_batch_size       = maxBatchSize();
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
-            RTP_LLM_LOG_DEBUG(
+            RTP_LLM_LOG_INFO(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
             collector.wait_latency_us          = wait_time_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;

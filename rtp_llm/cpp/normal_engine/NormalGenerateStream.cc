@@ -155,7 +155,6 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
-    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
 
     if (update_info.loss.defined()) {
@@ -186,12 +185,14 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%s] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamLogTag().c_str(),
-                      finished_,
-                      queryPdSep(),
-                      isStreaming(),
-                      update_info.update_remote_generate);
+    if (finished_) {
+        RTP_LLM_LOG_INFO("stream [%s] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
+                         streamLogTag().c_str(),
+                         finished_,
+                         queryPdSep(),
+                         isStreaming(),
+                         update_info.update_remote_generate);
+    }
 
     if (queryPdSep() && update_info.update_remote_generate) {
         RTP_LLM_LOG_DEBUG("stream [%s] hold kv cache for pd-sep", streamLogTag().c_str());

@@ -53,19 +53,19 @@ void SyncContext::updateResult(bool                                       succes
                                CacheStoreErrorCode                        ec,
                                const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
+    auto                        cost_time_ms = autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_;
     if (!success) {
         auto error_code = transCacheStoreErrorCode(ec);
         error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
         RTP_LLM_LOG_WARNING("request %s call finished, state:[%s], error code[%s], cost time %ldms",
                             request_block_buffer->getRequestKey().c_str(),
-                            success ? "success" : "failed",
+                            "failed",
                             CacheStoreErrorCodeToString(ec).c_str(),
-                            autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
-    } else {
-        RTP_LLM_LOG_DEBUG("request %s call finished, state:[%s], cost time %ldms",
-                          request_block_buffer->getRequestKey().c_str(),
-                          success ? "success" : "failed",
-                          autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
+                            cost_time_ms);
+    } else if (cost_time_ms > 100) {
+        RTP_LLM_LOG_INFO("request %s call finished, state:[success], cost time %ldms (slow)",
+                         request_block_buffer->getRequestKey().c_str(),
+                         cost_time_ms);
     }
 
     ++done_layer_cnt_;
