@@ -618,7 +618,7 @@ void GenerateStream::advance() {
             seq_len_override = mtp_override;
         }
     }
-    auto result = streamCacheResource().incrKVBlock(reserveStep(), seq_len_override);
+    auto result = streamCacheResource().incrKVBlock(reserveStep());
     if (!result.ok()) {
         generate_status_->reportEvent(StreamEvents::Error,
                                       ErrorCode::MALLOC_FAILED,

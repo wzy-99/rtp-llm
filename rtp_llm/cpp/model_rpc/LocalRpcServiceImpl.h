@@ -21,18 +21,18 @@ public:
         }
     }
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
-                              py::object                                             mm_process_engine,
-                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                              py::object                                             mm_process_engine) {
         prepareLocalServer();
-        return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
+        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
     grpc::Status init(const EngineInitParams&                                maga_init_params,
-                      py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                      py::object                                             weight_manager) {
+                      py::object                                             weight_manager,
+                      py::object                                             mm_process_engine) {
         (void)weight_manager;
         prepareLocalServer();
-        return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
+        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
@@ -204,15 +204,6 @@ public:
             return notReadyStatus("ExecuteFunction");
         }
         return local_server_->ExecuteFunction(context, request, response);
-    }
-
-    ::grpc::Status CpuTpBroadcast(::grpc::ServerContext*           context,
-                                  const ::CpuTpBroadcastRequestPB* request,
-                                  ::CpuTpBroadcastResponsePB*      response) override {
-        if (!local_server_) {
-            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "local rpc server is initializing");
-        }
-        return local_server_->CpuTpBroadcast(context, request, response);
     }
 
 protected:

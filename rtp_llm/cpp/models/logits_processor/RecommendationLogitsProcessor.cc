@@ -11,35 +11,9 @@ RecommendationLogitsProcessor::RecommendationLogitsProcessor(std::vector<StreamR
     infos_(std::move(infos)) {}
 
 std::shared_ptr<RecommendationLogitsProcessor>
-RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int32_t num) {
-    const auto& config = generate_input->generate_config;
-    if (config->combo_token_size <= 0) {
-        return nullptr;
-    }
-
-    // 过滤掉与 combo_token_size 不一致的 banned combo(保持鲁棒性)
-    std::set<std::vector<int>> banned_combos;
-    for (const auto& combo : config->banned_combo_token_ids) {
-        if ((int32_t)combo.size() == config->combo_token_size) {
-            banned_combos.insert(combo);
-        }
-    }
-
-    const bool is_beam_search = config->hasNumBeams() || config->num_return_sequences > 1;
-    // 若为空,think_done 初始为 true,Processor 行为等同历史版本(从首个 token 起累 combo)。
-    const std::vector<int>& end_think_token_ids = config->end_think_token_ids;
-
-    auto processor_ptr = std::make_shared<RecommendationLogitsProcessor>();
-    for (int32_t i = 0; i < num; ++i) {
-        StreamRecommendationInfo info(config->combo_token_size,
-                                      generate_input->inputLength(),
-                                      /*current_output_length=*/0,
-                                      is_beam_search,
-                                      banned_combos,
-                                      end_think_token_ids);
-        processor_ptr->infos_.push_back(std::move(info));
-    }
-    return processor_ptr;
+RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> /*generate_input*/, int32_t /*num*/) {
+    // combo_token_size field removed from GenerateConfig; feature disabled
+    return nullptr;
 }
 
 void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {

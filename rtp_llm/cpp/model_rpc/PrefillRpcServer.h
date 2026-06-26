@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
-#include "rtp_llm/cpp/cache/RecentCacheKeyWindow.h"
 #include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
 
 namespace rtp_llm {
@@ -63,7 +62,6 @@ private:
     void         remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
     void         remoteGenerate(PrefillGenerateContext& prefill_context);
     void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
-    void         reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateContext& prefill_context);
     void         startResponseRegistryGc();
     void         stopResponseRegistryGc();
     bool         tryStartAsyncResponseWorker();
@@ -74,17 +72,16 @@ private:
     std::string  batchTargetAddrForDpRank(int dp_rank) const;
 
 private:
-    std::string                           decode_cluster_name_;
-    std::unique_ptr<RecentCacheKeyWindow> prefill_recent_cache_key_window_;
-    ResponseBufferRegistry                response_registry_;
-    std::atomic<bool>                     response_gc_stop_{false};
-    std::mutex                            response_gc_mu_;
-    std::condition_variable               response_gc_cv_;
-    std::thread                           response_gc_thread_;
-    std::atomic<bool>                     response_worker_stop_{false};
-    std::mutex                            response_worker_mu_;
-    std::condition_variable               response_worker_cv_;
-    size_t                                response_worker_count_{0};
+    std::string             decode_cluster_name_;
+    ResponseBufferRegistry  response_registry_;
+    std::atomic<bool>       response_gc_stop_{false};
+    std::mutex              response_gc_mu_;
+    std::condition_variable response_gc_cv_;
+    std::thread             response_gc_thread_;
+    std::atomic<bool>       response_worker_stop_{false};
+    std::mutex              response_worker_mu_;
+    std::condition_variable response_worker_cv_;
+    size_t                  response_worker_count_{0};
 
     // Thread pools replacing std::async / std::thread::detach
     autil::ThreadPoolBasePtr enqueue_worker_pool_;  // Dispatch only (L1 DP dispatch, fast ms-level)

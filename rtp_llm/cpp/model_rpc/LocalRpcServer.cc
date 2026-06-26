@@ -1,5 +1,6 @@
 #include <memory>
 #include <chrono>
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -9,39 +10,14 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/distribute/RpcCpuTpBroadcaster.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
-namespace {
-
-std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
-    std::string tag = "request [" + request_key + "]";
-    if (!request_info.trace_id.empty()) {
-        tag += ", trace id [" + request_info.trace_id + "]";
-    }
-    if (!request_info.request_id.empty()) {
-        tag += ", source request id [" + request_info.request_id + "]";
-    }
-    if (!request_info.frontend_ip.empty()) {
-        tag += ", frontend ip [" + request_info.frontend_ip + "]";
-    }
-    if (!request_info.dash_ip.empty()) {
-        tag += ", dash ip [" + request_info.dash_ip + "]";
-    }
-    if (!request_info.source_role.empty()) {
-        tag += ", source role [" + request_info.source_role + "]";
-    }
-    return tag;
-}
-
-}  // namespace
-
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
-                                  py::object                                    mm_process_engine,
-                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
+                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                  py::object                                    mm_process_engine) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     weight_manager_   = maga_init_params.weight_manager;
@@ -63,18 +39,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
-    if (!mm_process_engine.is_none()) {
-        auto vit_separation = maga_init_params.vit_config.vit_separation;
-        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-            mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
-                                                              maga_init_params.model_config_.mm_model_config,
+    if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
+        if (mm_process_engine.is_none()) {
+            mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                               maga_init_params.model_config_.max_seq_len));
-        } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
+        } else {
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,
                                                              maga_init_params.model_config_.max_seq_len));
-        } else {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
         }
     }
 
@@ -82,15 +54,9 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
 }
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
-    return serializeErrorMsg(request_key, RequestInfo(), error_info);
-}
-
-grpc::Status
-LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
-    const auto& error_msg       = error_info.ToString();
-    const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
-    RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
-                        request_log_tag.c_str(),
+    const auto& error_msg = error_info.ToString();
+    RTP_LLM_LOG_WARNING("request [%s], error code [%s], error message [%s]",
+                        request_key.c_str(),
                         ErrorCodeToString(error_info.code()).c_str(),
                         error_msg.c_str());
     auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
@@ -101,7 +67,7 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
     if (error_details.SerializeToString(&error_details_serialized)) {
         return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
     } else {
-        RTP_LLM_LOG_WARNING("%s error details serialize to string failed", request_log_tag.c_str());
+        RTP_LLM_LOG_WARNING("request [%s] error details serialize to string failed", request_key.c_str());
         return grpc::Status(grpc_error_code, error_msg);
     }
 }
@@ -117,7 +83,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         const auto result = stream->nextOutput();
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
-                return serializeErrorMsg(request_key, stream->generateInput()->request_info, result.status());
+                return serializeErrorMsg(request_key, result.status());
             } else {
                 break;
             }
@@ -130,7 +96,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
-        if (context && context->IsCancelled()) {
+        if (context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
@@ -143,38 +109,64 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
         }
+        if (stream->queryPdSep()) {
+            stream->waitForRemoteGenerate();
+            break;
+        }
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
     return grpc::Status::OK;
 }
 
+ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
+    output = QueryConverter::transQuery(&input_pb);
+    if (mm_processor_ != nullptr && output->multimodal_inputs) {
+        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+        auto mm_res = mm_processor_->updateMultimodalFeatures(output);
+        if (!mm_res.ok()) {
+            return mm_res;
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*                  context,
+                                              std::shared_ptr<GenerateStream>&      stream,
+                                              const std::shared_ptr<GenerateInput>& input,
+                                              GenerateOutputs&                      last_outputs) {
+    while (!stream->isFinished() || stream->hasOutput()) {
+        if (context->IsCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+        }
+        const auto output_result = stream->nextOutput();
+        if (!output_result.ok()) {
+            if (output_result.status().code() != ErrorCode::FINISHED) {
+                return output_result.status();
+            }
+            break;
+        }
+        last_outputs = output_result.value();
+    }
+    return ErrorInfo::OkStatus();
+}
+
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
-    AtomicGuard request_guard(onflight_requests_);
-    auto        request_id = request->request_id();
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    auto               request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    auto input                    = QueryConverter::transQuery(request);
-    generate_context.request_info = input->request_info;
-    if (applyTimelineGate(generate_context.request_key,
-                          input->generate_config->gen_timeline,
-                          input->generate_config->profile_step,
-                          input->generate_config->profile_trace_name)) {
-        input->generate_config->gen_timeline = true;
-    }
-
-    // need to check client has buffer at first
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+    std::shared_ptr<GenerateInput> input;
+    {
+        auto mm_res = prepareInput(*request, input);
         if (!mm_res.ok()) {
-            generate_context.error_info = mm_res;
-            generate_context.error_status =
-                serializeErrorMsg(generate_context.request_key, generate_context.request_info, mm_res);
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
         }
     }
     CHECK_ERROR_STATUS(generate_context);
@@ -191,22 +183,6 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
-}
-
-bool LocalRpcServer::applyTimelineGate(const std::string& request_key,
-                                       bool               request_timeline,
-                                       int                profile_step,
-                                       const std::string& profile_trace_name) {
-    const bool force_timeline = engine_->isTimelineProfilingEnabled();
-    RTP_LLM_LOG_DEBUG("request [%s] timeline gate, force_timeline=%d, request_timeline=%d, trace_name=%s",
-                      request_key.c_str(),
-                      int(force_timeline),
-                      int(request_timeline),
-                      profile_trace_name.c_str());
-    if (!force_timeline && request_timeline) {
-        engine_->startTimelineProfiling(profile_trace_name, 0, profile_step);
-    }
-    return force_timeline;
 }
 
 grpc::Status
@@ -256,11 +232,6 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_phase(static_cast<::TaskPhase>(task.phase));
-        task_info->set_batch_id(task.batch_id);
-        if (task.error_code != 0) {
-            task_info->mutable_error_info()->set_error_code(task.error_code);
-            task_info->mutable_error_info()->set_error_message(task.error_message);
-        }
     }
 
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
@@ -273,39 +244,13 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_phase(static_cast<::TaskPhase>(task.phase));
-        task_info->set_batch_id(task.batch_id);
-        if (task.error_code != 0) {
-            task_info->mutable_error_info()->set_error_code(task.error_code);
-            task_info->mutable_error_info()->set_error_message(task.error_message);
-        }
     }
-
-    // Debug: log finished tasks details
-    if (!engine_schedule_info.finished_task_info_list.empty()) {
-        std::string task_details;
-        for (const auto& task : engine_schedule_info.finished_task_info_list) {
-            task_details +=
-                "  req_id=" + std::to_string(task.request_id) + " batch_id=" + std::to_string(task.batch_id) + "\n";
-        }
-        RTP_LLM_LOG_INFO("GetWorkerStatus response: request_latest_finished_version=%ld, "
-                         "response_latest_finished_version=%ld, "
-                         "finished_tasks_count=%ld\n%s",
-                         latest_finished_version,
-                         status_info.latest_finished_version,
-                         engine_schedule_info.finished_task_info_list.size(),
-                         task_details.c_str());
-    }
-
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
     response->set_status_version(status_info.status_version);
     response->set_latest_finished_version(status_info.latest_finished_version);
     response->set_alive(status_info.alive);
     response->set_precision(status_info.precision);
-    response->set_dp_rank(status_info.dp_rank);
-    auto kv_info = engine_->getCacheStatusInfo(-1, false);
-    response->set_available_kv_cache(kv_info.available_kv_cache);
-    response->set_total_kv_cache(kv_info.total_kv_cache);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }
@@ -372,8 +317,17 @@ size_t LocalRpcServer::onflightRequestNum() {
 }
 
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
-    EngineScheduleInfo info               = meta_->getEngineScheduleInfo(latest_finished_version);
-    auto               last_schedule_time = engine_->getLastScheduleTime();
+    EngineScheduleInfo                        info = meta_->getEngineScheduleInfo(latest_finished_version);
+    std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
+    for (auto& task_info : info.running_task_info_list) {
+        for (auto& running_task : running_task_info_list) {
+            if (task_info.request_id == running_task.request_id) {
+                task_info.phase = TaskPhase::RUNNING;
+            }
+        }
+    }
+    auto last_schedule_time = engine_->getLastScheduleTime();
+    // in case last_schedule_delta is negative
     info.last_schedule_delta =
         std::max((int64_t)0, autil::TimeUtility::currentTimeInMilliSeconds() - last_schedule_time);
     return info;
@@ -542,18 +496,6 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
-    return grpc::Status::OK;
-}
-
-::grpc::Status LocalRpcServer::CpuTpBroadcast(::grpc::ServerContext*           context,
-                                              const ::CpuTpBroadcastRequestPB* request,
-                                              ::CpuTpBroadcastResponsePB*      response) {
-    if (context->IsCancelled()) {
-        response->set_success(false);
-        response->set_error_message("request is cancelled");
-        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
-    }
-    (void)RpcCpuTpBroadcaster::instance().handleBroadcastRequest(*request, response);
     return grpc::Status::OK;
 }
 

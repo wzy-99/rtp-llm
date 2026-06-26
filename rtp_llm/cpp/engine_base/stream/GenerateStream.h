@@ -232,6 +232,8 @@ public:
     std::vector<torch::Tensor> multimodalFeatures() const;
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
+    std::vector<torch::Tensor> multimodalExtraInput() const;
+    bool                       hasMultimodalExtraInput() const;
 
     int64_t getTimeoutMs() const;
     void    checkTimeout();
@@ -435,9 +437,6 @@ public:
     }
 
     std::string traceId() const {
-        if (!generate_input_->request_info.trace_id.empty()) {
-            return generate_input_->request_info.trace_id;
-        }
         return generate_input_->generate_config->trace_id;
     }
 

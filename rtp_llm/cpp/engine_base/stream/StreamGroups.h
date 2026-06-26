@@ -140,45 +140,18 @@ public:
     // below so this isn't completely silent; long-term the scheduler should
     // batch-partition by mode, or the sampler should branch per-row. See
     // PR #349 review for context.
-    ReturnAllProbsMode needReturnAllProbs() const {
-        // get the max return all probs mode from all streams
-        ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
-        bool               has_default      = false;
-        bool               has_original     = false;
+    bool needReturnAllProbs() const {
         for (auto& stream : context_streams_) {
-            auto cur_return_all_probs = stream->getReturnAllProbs();
-            if (cur_return_all_probs == ReturnAllProbsMode::DEFAULT) {
-                has_default = true;
-            } else if (cur_return_all_probs == ReturnAllProbsMode::ORIGINAL) {
-                has_original = true;
-            }
-            if (cur_return_all_probs > return_all_probs) {
-                return_all_probs = cur_return_all_probs;
+            if (stream->getReturnAllProbs()) {
+                return true;
             }
         }
         for (auto& stream : decode_streams_) {
-            auto cur_return_all_probs = stream->getReturnAllProbs();
-            if (cur_return_all_probs == ReturnAllProbsMode::DEFAULT) {
-                has_default = true;
-            } else if (cur_return_all_probs == ReturnAllProbsMode::ORIGINAL) {
-                has_original = true;
-            }
-            if (cur_return_all_probs > return_all_probs) {
-                return_all_probs = cur_return_all_probs;
+            if (stream->getReturnAllProbs()) {
+                return true;
             }
         }
-        if (has_default && has_original) {
-            // One-shot log per process: DEFAULT streams in this batch will
-            // see un-renormalized raw probs because sampler runs ORIGINAL.
-            static std::once_flag mixed_mode_warn_once;
-            std::call_once(mixed_mode_warn_once, []() {
-                RTP_LLM_LOG_WARNING("needReturnAllProbs: batch contains both DEFAULT and ORIGINAL "
-                                    "return_all_probs streams; DEFAULT consumers will receive raw "
-                                    "(un-renormalized) probabilities for this batch. The scheduler "
-                                    "should partition by mode to avoid this silent degradation.");
-            });
-        }
-        return return_all_probs;
+        return false;
     }
 
     bool needReturnCumLogProbs() const {
