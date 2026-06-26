@@ -66,7 +66,7 @@ bool envValueIsTrue(const char* value) {
                || strcasecmp(value, "yes") == 0);
 }
 
-bool envValueIsFalse(const char* value) {
+[[maybe_unused]] bool envValueIsFalse(const char* value) {
     return value != nullptr
            && (strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0
                || strcasecmp(value, "no") == 0);
@@ -448,11 +448,11 @@ std::string PrefillRpcServer::batchTargetAddrForDpRank(int dp_rank) const {
 }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                    py::object                                             mm_process_engine,
-                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                    py::object                                             mm_process_engine) {
     RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
-    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }
@@ -553,13 +553,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
-    if (applyTimelineGate(prefill_context.request_key,
-                          input->generate_config->gen_timeline,
-                          input->generate_config->profile_step,
-                          input->generate_config->profile_trace_name)) {
-        input->generate_config->gen_timeline = true;
-    }
+    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
