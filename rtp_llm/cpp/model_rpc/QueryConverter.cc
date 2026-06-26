@@ -146,11 +146,6 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
         auto mm_input             = &mm_inputs->multimodal_inputs(i);
         auto mm_preprocess_config = &mm_input->mm_preprocess_config();
 
-        std::vector<float> crop_positions;
-        for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
-            crop_positions.push_back(crop_position);
-        }
-
         // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
         // for now
         inputs_vec.emplace_back(mm_input->multimodal_url(),
@@ -162,9 +157,7 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->max_pixels(),
                                 mm_preprocess_config->fps(),
                                 mm_preprocess_config->min_frames(),
-                                mm_preprocess_config->max_frames(),
-                                crop_positions,
-                                mm_preprocess_config->mm_timeout_ms());
+                                mm_preprocess_config->max_frames());
     }
     return inputs_vec;
 }
