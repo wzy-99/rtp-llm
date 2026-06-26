@@ -96,14 +96,20 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
-    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
-    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+    // Prepare KV cache allocation, then wait until the stream is ready.
+    // This busy-wait is safe because the stream has not been enqueued to the
+    // scheduler yet -- the gRPC thread exclusively drives the state machine.
+    generate_stream->prepare();
+    while (generate_stream->alive() && !generate_stream->isReady()) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
-    if (generate_stream->hasError()) {
-        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
+    if (!generate_stream->alive() || generate_stream->hasError()) {
+        auto   stream_error = generate_stream->statusInfo();
+        string error_msg    = stream_error.ToString();
+        if (error_msg.empty()) {
+            error_msg = "malloc kv cache block failed at decode node";
+        }
+        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
@@ -322,11 +328,16 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
     auto max_rpc_timeout_ms    = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto rpc_timeout           = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    auto min_timeout_ms        = std::min(load_cache_timeout_ms, rpc_timeout);
-    auto request_timeout_ms    = decode_context.request_timeout_ms;
-    min_timeout_ms             = request_timeout_ms > 0 ? std::min(request_timeout_ms, min_timeout_ms) : min_timeout_ms;
-
+    // load_cache_timeout_ms is the KV-cache loading deadline and always applies;
+    // max_rpc_timeout_ms / request_timeout_ms only participate in min when > 0
+    int64_t min_timeout_ms     = load_cache_timeout_ms;
+    auto    request_timeout_ms = decode_context.request_timeout_ms;
+    if (max_rpc_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, max_rpc_timeout_ms);
+    }
+    if (request_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
+    }
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
