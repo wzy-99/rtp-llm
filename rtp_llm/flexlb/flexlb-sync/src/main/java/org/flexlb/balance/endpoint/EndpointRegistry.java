@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -16,14 +16,14 @@ public class EndpointRegistry {
     private final ConcurrentHashMap<String, PrefillEndpoint> prefillEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DecodeEndpoint> decodeEndpoints = new ConcurrentHashMap<>();
     private final ConfigService configService;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final BatchDecisionHandler batchDecisionHandler;
     private final BatchSchedulerReporter reporter;
 
     public EndpointRegistry(ConfigService configService,
-                            @Lazy FlexlbBatchScheduler batchScheduler,
+                            @Lazy BatchDecisionHandler batchDecisionHandler,
                             BatchSchedulerReporter reporter) {
         this.configService = configService;
-        this.batchScheduler = batchScheduler;
+        this.batchDecisionHandler = batchDecisionHandler;
         this.reporter = reporter;
     }
 
@@ -45,7 +45,7 @@ public class EndpointRegistry {
 
     public PrefillEndpoint ensurePrefillEndpoint(String ipPort, WorkerStatus status) {
         return prefillEndpoints.computeIfAbsent(ipPort,
-                k -> new PrefillEndpoint(status, configService.loadBalanceConfig(), batchScheduler, reporter));
+                k -> new PrefillEndpoint(status, configService.loadBalanceConfig(), batchDecisionHandler, reporter));
     }
 
     public DecodeEndpoint ensureDecodeEndpoint(String ipPort, WorkerStatus status) {

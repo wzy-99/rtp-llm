@@ -3,7 +3,7 @@ package org.flexlb.balance.policy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 
@@ -33,9 +33,8 @@ class ConfigurableGroupRoutingPolicyTest {
         request.setRequestId(12345L);
         request.setSeqLen(10000L);
 
-        BalanceContext balanceContext = new BalanceContext();
+        FlexlbRequest balanceContext = new FlexlbRequest(request);
         balanceContext.setConfig(flexlbConfig);
-        balanceContext.setRequest(request);
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
         ConfigurableGroupRoutingPolicy policy = new ConfigurableGroupRoutingPolicy(configService);
@@ -70,9 +69,8 @@ class ConfigurableGroupRoutingPolicyTest {
         request.setRequestId(12345L);
         request.setSeqLen(128L);
 
-        BalanceContext balanceContext = new BalanceContext();
+        FlexlbRequest balanceContext = new FlexlbRequest(request);
         balanceContext.setConfig(flexlbConfig);
-        balanceContext.setRequest(request);
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
         ConfigurableGroupRoutingPolicy policy = new ConfigurableGroupRoutingPolicy(configService);
@@ -90,9 +88,8 @@ class ConfigurableGroupRoutingPolicyTest {
         request.setRequestId(12345L);
         request.setSeqLen(128L);
 
-        BalanceContext balanceContext = new BalanceContext();
+        FlexlbRequest balanceContext = new FlexlbRequest(request);
         balanceContext.setConfig(flexlbConfig);
-        balanceContext.setRequest(request);
 
         ConfigurableGroupRoutingPolicy policy = new ConfigurableGroupRoutingPolicy(configService);
         GroupRoutingDecision decision = policy.route(balanceContext);

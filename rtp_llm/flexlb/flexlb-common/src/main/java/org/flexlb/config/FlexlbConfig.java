@@ -348,7 +348,7 @@ public class FlexlbConfig {
 
     /**
      * Maximum total in-flight requests across all batchers. Acts as a global
-     * admission control gate at the FlexlbBatchScheduler entry.
+     * admission control gate at the BatchScheduler entry.
      */
     private int flexlbBatchMaxInflight = 100000;
 

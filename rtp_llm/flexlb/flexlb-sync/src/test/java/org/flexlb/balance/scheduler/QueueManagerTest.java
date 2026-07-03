@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -12,8 +12,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -43,12 +41,11 @@ class QueueManagerTest {
 
     @Test
     void tryRouteAsync_shouldEnqueueSuccessfully() {
-        BalanceContext ctx = createContext(1L);
-        var mono = queueManager.tryRouteAsync(ctx);
+        FlexlbRequest request = createRequest(1L);
+        var mono = queueManager.tryRouteAsync(request);
 
         assertNotNull(mono);
-        assertNotNull(ctx.getFuture());
-        assertTrue(ctx.getEnqueueTime() > 0);
+        assertNotNull(request.getFuture());
         verify(metrics).reportQueueEntry();
     }
 
@@ -56,12 +53,12 @@ class QueueManagerTest {
     void tryRouteAsync_shouldRejectWhenQueueFull() {
         // Fill the queue
         for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createContext(i));
+            queueManager.tryRouteAsync(createRequest(i));
         }
 
         // 11th request should be rejected
-        BalanceContext ctx = createContext(11L);
-        Response response = queueManager.tryRouteAsync(ctx).block();
+        FlexlbRequest request = createRequest(11L);
+        Response response = queueManager.tryRouteAsync(request).block();
 
         assertNotNull(response);
         assertFalse(response.isSuccess());
@@ -71,74 +68,87 @@ class QueueManagerTest {
 
     @Test
     void takeRequest_shouldReturnNullWhenEmpty() {
-        BalanceContext result = queueManager.takeRequest(false, 0);
+        QueueManager.QueueSlot result = queueManager.takeRequest(false, 0);
         assertNull(result);
     }
 
     @Test
     void takeRequest_shouldReturnEnqueuedRequest() {
-        BalanceContext ctx = createContext(1L);
-        queueManager.tryRouteAsync(ctx);
+        FlexlbRequest request = createRequest(1L);
+        queueManager.tryRouteAsync(request);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        QueueManager.QueueSlot taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(1L, taken.getRequestId());
+        assertEquals(1L, taken.getRequest().getRequestId());
     }
 
     @Test
     void takeRequest_shouldSkipCancelledRequests() {
-        BalanceContext cancelled = createContext(1L);
+        FlexlbRequest cancelled = createRequest(1L);
         queueManager.tryRouteAsync(cancelled);
         cancelled.cancel();
 
-        BalanceContext valid = createContext(2L);
+        FlexlbRequest valid = createRequest(2L);
         queueManager.tryRouteAsync(valid);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        QueueManager.QueueSlot taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
+        assertEquals(2L, taken.getRequest().getRequestId());
     }
 
     @Test
     void offerToHead_shouldRequeueAtFront() {
-        BalanceContext first = createContext(1L);
+        FlexlbRequest first = createRequest(1L);
         queueManager.tryRouteAsync(first);
 
-        BalanceContext retried = createContext(2L);
-        retried.setFuture(new CompletableFuture<>());
-        retried.setEnqueueTime(System.currentTimeMillis());
-        queueManager.offerToHead(retried);
+        FlexlbRequest retried = createRequest(2L);
+        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(retried, System.currentTimeMillis(), 0L);
+        queueManager.offerToHead(slot);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        QueueManager.QueueSlot taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
+        assertEquals(2L, taken.getRequest().getRequestId());
     }
 
     @Test
     void offerToHead_shouldCompleteWithErrorWhenQueueFull() {
         // Fill the queue
         for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createContext(i));
+            queueManager.tryRouteAsync(createRequest(i));
         }
 
-        BalanceContext ctx = createContext(99L);
-        CompletableFuture<Response> future = new CompletableFuture<>();
-        ctx.setFuture(future);
+        FlexlbRequest request = createRequest(99L);
+        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, System.currentTimeMillis(), 99L);
 
-        queueManager.offerToHead(ctx);
+        queueManager.offerToHead(slot);
 
-        assertTrue(future.isDone());
-        Response response = future.join();
+        assertTrue(request.getFuture().isDone());
+        Response response = request.getFuture().join();
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), response.getCode());
     }
 
-    private BalanceContext createContext(long requestId) {
-        BalanceContext ctx = new BalanceContext();
+    @Test
+    void cancelByRequestId_shouldCancelQueuedRequest() {
+        FlexlbRequest request = createRequest(1L);
+        queueManager.tryRouteAsync(request);
+
+        boolean cancelled = queueManager.cancelByRequestId(1L);
+        assertTrue(cancelled);
+        assertTrue(request.isCancelled());
+        assertTrue(request.getFuture().isCompletedExceptionally());
+    }
+
+    @Test
+    void cancelByRequestId_returnsFalseForUnknownRequest() {
+        boolean cancelled = queueManager.cancelByRequestId(999L);
+        assertFalse(cancelled);
+    }
+
+    private FlexlbRequest createRequest(long requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setGenerateTimeout(60_000);
-        ctx.setRequest(request);
-        return ctx;
+        return new FlexlbRequest(request);
     }
 }

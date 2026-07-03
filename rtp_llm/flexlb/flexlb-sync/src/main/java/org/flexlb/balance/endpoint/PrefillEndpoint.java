@@ -9,6 +9,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
@@ -17,6 +18,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -80,8 +82,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return new PrefillTimePredictor(cfg.getCostFormula());
     }
 
-    public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
-        inflightBatches.put(batchId, new BatchInflight(batchId, predictMs, requests));
+    public void commitBatch(long batchId, long predictMs, Map<Integer, List<BatchItem>> requestsByDpRank) {
+        inflightBatches.put(batchId, new BatchInflight(batchId, predictMs, requestsByDpRank));
         refreshEstimatedWaitingTime();
     }
 
@@ -99,13 +101,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public BatchInflight repackBatch(long batchId, Set<Long> failedRequestIds) {
         BatchInflight result = inflightBatches.computeIfPresent(batchId, (id, old) -> {
-            List<BatchItem> survivors = old.requests().stream()
-                    .filter(r -> !failedRequestIds.contains(r.requestId()))
-                    .toList();
+            Map<Integer, List<BatchItem>> survivors = new LinkedHashMap<>();
+            for (var entry : old.requestsByDpRank().entrySet()) {
+                List<BatchItem> slotSurvivors = entry.getValue().stream()
+                        .filter(r -> !failedRequestIds.contains(r.requestId()))
+                        .toList();
+                if (!slotSurvivors.isEmpty()) {
+                    survivors.put(entry.getKey(), slotSurvivors);
+                }
+            }
             if (survivors.isEmpty()) {
                 return null; // removes entry from map
             }
-            long newPredMs = predictor != null ? predictor.predictBatchMs(survivors) : 0;
+            long newPredMs = predictor != null
+                    ? predictor.predictBatchMs(survivors.values().stream().flatMap(List::stream).toList())
+                    : 0;
             return old.repack(newPredMs, survivors);
         });
         refreshEstimatedWaitingTime();
@@ -260,7 +270,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public int getInflightRequestCount() {
         int count = 0;
         for (BatchInflight batch : inflightBatches.values()) {
-            count += batch.requests().size();
+            count += batch.requestCount();
         }
         return count;
     }
@@ -301,12 +311,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Report per-worker batch metrics via the given reporter.
-     * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
+     * Called periodically by {@link org.flexlb.balance.scheduler.BatchMetricsCollector}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportBatcherQueueDepth("prefill", getIp(), getBatcherQueueSize());
-        reporter.reportPrefillInflightBatchCount("prefill", getIp(), getInflightBatchCount());
-        reporter.reportPrefillInflightRequestCount("prefill", getIp(), getInflightRequestCount());
+        reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), getBatcherQueueSize());
+        reporter.reportPrefillInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
+        reporter.reportPrefillInflightRequestCount(RoleType.PREFILL.name(), getIp(), getInflightRequestCount());
     }
 
     /**
@@ -330,12 +340,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         long predictedMs = batch.predictTimeMs();
         long gapMs = actualMs - predictedMs;
         logger.info("flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
-                batchId, predictedMs, actualMs, gapMs, batch.requests().size(), getIp());
+                batchId, predictedMs, actualMs, gapMs, batch.requestCount(), getIp());
 
         if (reporter != null) {
-            reporter.reportBatchPredictedTimeMs("prefill", getIp(), predictedMs);
-            reporter.reportBatchActualTimeMs("prefill", getIp(), actualMs);
-            reporter.reportBatchPredictGapMs("prefill", getIp(), gapMs);
+            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
+            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
+            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
         }
     }
 

@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -13,8 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -56,97 +54,95 @@ class RequestSchedulerTest {
 
     @Test
     void processRequest_shouldCompleteOnSuccess() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        FlexlbRequest request = createRequest(1L);
+        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
         Response successResponse = new Response();
         successResponse.setSuccess(true);
-        when(router.route(ctx)).thenReturn(successResponse);
+        when(router.route(request)).thenReturn(successResponse);
 
         // Use reflection to invoke private processRequest
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
         method.setAccessible(true);
-        method.invoke(scheduler, ctx);
+        method.invoke(scheduler, slot);
 
-        assertTrue(ctx.getFuture().isDone());
-        assertTrue(ctx.getFuture().get().isSuccess());
+        assertTrue(request.getFuture().isDone());
+        assertTrue(request.getFuture().get().isSuccess());
         verify(metrics).reportRoutingSuccessQps(0);
     }
 
     @Test
     void processRequest_shouldRetryOnRetryableError() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        FlexlbRequest request = createRequest(1L);
+        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        when(router.route(request)).thenReturn(errorResponse);
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
         method.setAccessible(true);
-        method.invoke(scheduler, ctx);
+        method.invoke(scheduler, slot);
 
-        assertEquals(1, ctx.getRetryCount());
-        verify(queueManager).offerToHead(ctx);
+        assertEquals(1, slot.getRetryCount().get());
+        verify(queueManager).offerToHead(slot);
         verify(metrics).reportRoutingFailureQps(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
     }
 
     @Test
     void processRequest_shouldNotRetryOnNonRetryableError() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        FlexlbRequest request = createRequest(1L);
+        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
         Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        when(router.route(request)).thenReturn(errorResponse);
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
         method.setAccessible(true);
-        method.invoke(scheduler, ctx);
+        method.invoke(scheduler, slot);
 
-        assertEquals(0, ctx.getRetryCount());
+        assertEquals(0, slot.getRetryCount().get());
         verify(queueManager, never()).offerToHead(any());
-        assertTrue(ctx.getFuture().isDone());
-        assertFalse(ctx.getFuture().get().isSuccess());
+        assertTrue(request.getFuture().isDone());
+        assertFalse(request.getFuture().get().isSuccess());
     }
 
     @Test
     void processRequest_shouldStopRetryingAfterMaxRetries() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        FlexlbRequest request = createRequest(1L);
+        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
         // Simulate already retried 3 times (max)
         for (int i = 0; i < 3; i++) {
-            ctx.incrementRetryCount();
+            slot.incrementRetryCount();
         }
 
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        when(router.route(request)).thenReturn(errorResponse);
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
         method.setAccessible(true);
-        method.invoke(scheduler, ctx);
+        method.invoke(scheduler, slot);
 
         // Should NOT re-queue, should complete with error
         verify(queueManager, never()).offerToHead(any());
-        assertTrue(ctx.getFuture().isDone());
-        assertFalse(ctx.getFuture().get().isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), ctx.getFuture().get().getCode());
+        assertTrue(request.getFuture().isDone());
+        assertFalse(request.getFuture().get().isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), request.getFuture().get().getCode());
     }
 
     @Test
     void processRequest_shouldCompleteExceptionallyOnException() throws Exception {
-        BalanceContext ctx = createContext(1L);
-        when(router.route(ctx)).thenThrow(new RuntimeException("routing error"));
+        FlexlbRequest request = createRequest(1L);
+        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
+        when(router.route(request)).thenThrow(new RuntimeException("routing error"));
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
         method.setAccessible(true);
-        method.invoke(scheduler, ctx);
+        method.invoke(scheduler, slot);
 
-        assertTrue(ctx.getFuture().isCompletedExceptionally());
+        assertTrue(request.getFuture().isCompletedExceptionally());
     }
 
-    private BalanceContext createContext(long requestId) {
-        BalanceContext ctx = new BalanceContext();
+    private FlexlbRequest createRequest(long requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setGenerateTimeout(60_000);
-        ctx.setRequest(request);
-        ctx.setFuture(new CompletableFuture<>());
-
-        FlexlbConfig config = new FlexlbConfig();
-        config.setMaxRetryCount(3);
-        ctx.setConfig(config);
-        return ctx;
+        return new FlexlbRequest(request);
     }
 }

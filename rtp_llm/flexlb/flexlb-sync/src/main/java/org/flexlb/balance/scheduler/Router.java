@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Response;
 
 /**
@@ -19,9 +19,9 @@ public interface Router {
     /**
      * Route requests based on load balancing strategy and select appropriate worker nodes.
      *
-     * @param balanceContext Load balancing context containing request information and available worker list
+     * @param request FlexLB request containing request information and routing configuration
      * @return Response containing selected worker node information
      */
-    Response route(BalanceContext balanceContext);
+    Response route(FlexlbRequest request);
 
 }

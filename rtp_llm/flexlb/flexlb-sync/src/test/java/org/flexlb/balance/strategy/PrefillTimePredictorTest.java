@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -307,14 +307,13 @@ class PrefillTimePredictorTest {
         request.setRequestId(1L);
         request.setSeqLen(seqLen);
 
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(request);
+        FlexlbRequest req = new FlexlbRequest(request);
 
         ServerStatus prefill = new ServerStatus();
         DebugInfo debugInfo = new DebugInfo();
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, null, null, prefill, null, null, null, 0, System.currentTimeMillis());
+        return new BatchItem(req, null, null, prefill, null, null, null, 0, System.currentTimeMillis());
     }
 }

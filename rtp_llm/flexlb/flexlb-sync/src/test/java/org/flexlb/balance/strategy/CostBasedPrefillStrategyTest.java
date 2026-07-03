@@ -6,12 +6,12 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -38,7 +38,7 @@ class CostBasedPrefillStrategyTest {
     private CacheAwareService cacheAwareService;
     private ResourceMeasureFactory resourceMeasureFactory;
     private EngineHealthReporter engineHealthReporter;
-    private FlexlbBatchScheduler batchScheduler;
+    private BatchDecisionHandler batchDecisionHandler;
     private EndpointRegistry endpointRegistry;
     private CostBasedPrefillStrategy strategy;
 
@@ -50,10 +50,10 @@ class CostBasedPrefillStrategyTest {
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
-        batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
+        batchDecisionHandler = Mockito.mock(BatchDecisionHandler.class);
 
         // Create registry first to break circular dependency
-        endpointRegistry = new EndpointRegistry(configService, batchScheduler, Mockito.mock(BatchSchedulerReporter.class));
+        endpointRegistry = new EndpointRegistry(configService, batchDecisionHandler, Mockito.mock(BatchSchedulerReporter.class));
         engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
 
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
@@ -285,8 +285,7 @@ class CostBasedPrefillStrategyTest {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(req);
+        FlexlbRequest flexReq = new FlexlbRequest(req);
         // For prediction, hitCache comes from prefill.debugInfo.  Use null prefill → 0,
         // but the caller's hitCache parameter is what matters for prediction — we set it
         // via the constructor as a convenience; the predictor will call item.hitCache()
@@ -296,26 +295,25 @@ class CostBasedPrefillStrategyTest {
             di.setHitCacheLen(hitCache);
             org.flexlb.dao.loadbalance.ServerStatus ss = new org.flexlb.dao.loadbalance.ServerStatus();
             ss.setDebugInfo(di);
-            return new BatchItem(ctx, null, null, ss, null, null, null, 0, 0);
+            return new BatchItem(flexReq, null, null, ss, null, null, null, 0, 0);
         }
-        return new BatchItem(ctx, null, null, null, null, null, null, 0, 0);
+        return new BatchItem(flexReq, null, null, null, null, null, null, 0, 0);
     }
 
-    private BalanceContext buildContext(long seqLen, long requestId) {
+    private FlexlbRequest buildContext(long seqLen, long requestId) {
         FlexlbConfig config = new FlexlbConfig();
         config.setCostSloMs(50000L);
         config.setCostSloRiskMarginMs(50L);
         return buildContext(seqLen, requestId, config);
     }
 
-    private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {
+    private FlexlbRequest buildContext(long seqLen, long requestId, FlexlbConfig config) {
         Request req = new Request();
         req.setSeqLen(seqLen);
         req.setRequestId(requestId);
         req.setBlockCacheKeys(new ArrayList<>(List.of(1L, 2L)));
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(req);
-        ctx.setConfig(config);
-        return ctx;
+        FlexlbRequest flexReq = new FlexlbRequest(req);
+        flexReq.setConfig(config);
+        return flexReq;
     }
 }

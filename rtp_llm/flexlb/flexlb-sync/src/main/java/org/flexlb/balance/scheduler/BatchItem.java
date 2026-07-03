@@ -2,30 +2,29 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * A single inference request queued for batch dispatch.
- *
- * <p>Extracted from {@link FlexlbBatchScheduler} to reduce coupling
- * with {@link WorkerBatcher}.
  *
  * <p>Carries direct {@link PrefillEndpoint} / {@link DecodeEndpoint} references
  * so downstream operations (commit, rollback, ack, cancel) avoid repeated
  * {@code EndpointRegistry} lookups by ip+port.
  *
- * <p>{@link #sortKey} is mutable — the {@link BatcherAlgorithm} computes it
- * inside {@link WorkerBatcher#offer(BatchItem)} via {@link BatcherAlgorithm#computeSortKey}.
+ * <p>Also absorbs the former {@code InflightEntry} fields (rolledBack,
+ * ackFinished, batchId, terminated) to eliminate the three-layer wrapping
+ * (BalanceContext → BatchItem → InflightEntry).
  */
-public final class BatchItem {
+public final class BatchItem implements InflightEvictor.TtlTracked {
 
-    private final BalanceContext ctx;
-    private final CompletableFuture<Response> future;
+    private final FlexlbRequest request;
     private final Response routeResponse;
     private final ServerStatus prefill;
     private final ServerStatus decode;
@@ -36,8 +35,14 @@ public final class BatchItem {
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
-    public BatchItem(BalanceContext ctx,
-                     CompletableFuture<Response> future,
+    // --- Former InflightEntry fields (absorbed) ---
+
+    private final AtomicBoolean rolledBack = new AtomicBoolean(false);
+    private volatile boolean ackFinished;
+    private volatile long batchId = -1;
+    private final AtomicBoolean terminated = new AtomicBoolean(false);
+
+    public BatchItem(FlexlbRequest request,
                      Response routeResponse,
                      ServerStatus prefill,
                      ServerStatus decode,
@@ -45,8 +50,7 @@ public final class BatchItem {
                      DecodeEndpoint decodeEp,
                      long sortKey,
                      long enqueuedAtMs) {
-        this.ctx = ctx;
-        this.future = future;
+        this.request = request;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
         this.decode = decode;
@@ -58,8 +62,8 @@ public final class BatchItem {
 
     // -- accessors --
 
-    public BalanceContext ctx() { return ctx; }
-    public CompletableFuture<Response> future() { return future; }
+    public FlexlbRequest request() { return request; }
+    public CompletableFuture<Response> future() { return request.getFuture(); }
     public Response routeResponse() { return routeResponse; }
     public ServerStatus prefill() { return prefill; }
     public ServerStatus decode() { return decode; }
@@ -77,17 +81,77 @@ public final class BatchItem {
     @Deprecated
     public long deadlineMs() { return sortKey; }
 
-    // -- derived accessors --
+    // -- TtlTracked --
+
+    @Override
+    public long createdAtMs() { return enqueuedAtMs; }
+
+    // -- delegation methods (eliminate multi-layer indirection) --
 
     public long requestId() {
-        return ctx != null && ctx.getRequest() != null
-                ? ctx.getRequest().getRequestId() : 0;
+        return request != null ? request.getRequestId() : 0;
     }
+
+    public boolean isCancelled() {
+        return request != null && request.isCancelled();
+    }
+
+    public void cancel() {
+        if (request != null) {
+            request.cancel();
+        }
+    }
+
+    public boolean tryTerminate() {
+        return terminated.compareAndSet(false, true);
+    }
+
+    public boolean isTerminated() {
+        return terminated.get();
+    }
+
+    public byte[] generateInputPbBytes() {
+        return request != null ? request.getGenerateInputPbBytes() : null;
+    }
+
+    // -- InflightEntry absorbed fields --
+
+    public AtomicBoolean rolledBack() { return rolledBack; }
+    public boolean isAckFinished() { return ackFinished; }
+    public void setAckFinished(boolean ackFinished) { this.ackFinished = ackFinished; }
+    public long batchId() { return batchId; }
+    public void setBatchId(long batchId) { this.batchId = batchId; }
+    public void setBatchIdIfUnset(long batchId) {
+        if (this.batchId < 0) {
+            this.batchId = batchId;
+        }
+    }
+
+    // -- Idempotent cleanup methods (for Q2 CleanupCoordinator) --
+
+    /** Rollback decode KV reservation. CAS-guarded — only executes once. */
+    public void rollbackDecode() {
+        if (rolledBack.compareAndSet(false, true)) {
+            if (decodeEp != null && decode != null) {
+                decodeEp.release(requestId());
+            }
+        }
+    }
+
+    /** Repack prefill batch to remove this request. Self-guarding: no-op if batchId < 0. */
+    public void repackPrefillBatch() {
+        if (batchId < 0) return;
+        if (prefillEp != null) {
+            prefillEp.repackBatch(batchId, Set.of(requestId()));
+        }
+    }
+
+    // -- derived accessors --
 
     /** Total sequence length of this request. */
     public long seqLen() {
-        return ctx != null && ctx.getRequest() != null
-                ? ctx.getRequest().getSeqLen() : 0;
+        return request != null && request.getRequest() != null
+                ? request.getRequest().getSeqLen() : 0;
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
@@ -113,7 +177,7 @@ public final class BatchItem {
         if (this == o) return true;
         if (!(o instanceof BatchItem that)) return false;
         return sortKey == that.sortKey && enqueuedAtMs == that.enqueuedAtMs
-                && Objects.equals(ctx, that.ctx) && Objects.equals(future, that.future)
+                && Objects.equals(request, that.request)
                 && Objects.equals(routeResponse, that.routeResponse)
                 && Objects.equals(prefill, that.prefill)
                 && Objects.equals(decode, that.decode)
@@ -123,7 +187,7 @@ public final class BatchItem {
 
     @Override
     public int hashCode() {
-        return Objects.hash(ctx, future, routeResponse, prefill, decode,
+        return Objects.hash(request, routeResponse, prefill, decode,
                 prefillEp, decodeEp, sortKey, enqueuedAtMs);
     }
 

@@ -7,7 +7,7 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -77,8 +77,7 @@ class CostBasedDecodeStrategyTest {
         req.setSeqLen(1000);
         req.setRequestId(1000L);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
@@ -118,8 +117,7 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
@@ -161,8 +159,7 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
@@ -193,8 +190,7 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, "group-a");
@@ -230,8 +226,7 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
         int totalRuns = 10000;
@@ -289,8 +284,7 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
@@ -327,8 +321,7 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);

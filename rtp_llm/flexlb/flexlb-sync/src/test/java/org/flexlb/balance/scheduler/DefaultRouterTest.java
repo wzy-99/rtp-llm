@@ -8,7 +8,7 @@ import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -66,7 +66,7 @@ class DefaultRouterTest {
     private EndpointRegistry endpointRegistry;
 
     @Mock
-    private BalanceContext balanceContext;
+    private FlexlbRequest flexlbRequest;
 
     @Mock
     private Request request;
@@ -101,15 +101,15 @@ class DefaultRouterTest {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
 
         // Create scheduler instance
-        lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
+        lenient().when(groupRoutingPolicy.route(any(FlexlbRequest.class))).thenReturn(GroupRoutingDecision.none());
         defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, endpointRegistry);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
 
-        // Mock balance context
-        lenient().when(balanceContext.getRequest()).thenReturn(request);
-        lenient().when(balanceContext.getRequestId()).thenReturn(12345L);
+        // Mock flexlb request
+        lenient().when(flexlbRequest.getRequest()).thenReturn(request);
+        lenient().when(flexlbRequest.getRequestId()).thenReturn(12345L);
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -147,7 +147,7 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -159,7 +159,7 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_available_worker_error_when_model_not_in_worker_status_map() {
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -187,17 +187,17 @@ class DefaultRouterTest {
         prefillServerStatus.setHttpPort(8080);
         prefillServerStatus.setGroup("group1");
         prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
+        when(prefillLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(true);
         decodeServerStatus.setServerIp("192.168.1.2");
         decodeServerStatus.setHttpPort(8081);
         decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -216,10 +216,10 @@ class DefaultRouterTest {
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(false);
         prefillServerStatus.setMessage("No prefill worker available");
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
+        when(prefillLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -241,10 +241,10 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRequestId(54321L);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -263,10 +263,10 @@ class DefaultRouterTest {
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(false);
         fusionServerStatus.setMessage("No fusion worker available");
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -293,17 +293,17 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRole(RoleType.PDFUSION);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.4");
         vitServerStatus.setHttpPort(8083);
         vitServerStatus.setRole(RoleType.VIT);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -330,15 +330,15 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRole(RoleType.PDFUSION);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(false);
         vitServerStatus.setMessage("No vit worker available");
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -349,10 +349,10 @@ class DefaultRouterTest {
     @Test
     void should_log_error_when_master_request_is_null() {
         // Setup
-        when(balanceContext.getRequest()).thenReturn(null);
+        when(flexlbRequest.getRequest()).thenReturn(null);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -369,10 +369,10 @@ class DefaultRouterTest {
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(false);
         decodeServerStatus.setMessage("No decode worker available");
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -398,19 +398,19 @@ class DefaultRouterTest {
         decodeServerStatus.setHttpPort(8081);
         decodeServerStatus.setGroup("group1");
         decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(false);
         prefillServerStatus.setMessage("No prefill worker available");
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
+        when(prefillLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
 
         // Ensure endpoint registry returns a non-null endpoint so rollback proceeds
         lenient().when(endpointRegistry.get("192.168.1.2:8081"))
                 .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -430,10 +430,10 @@ class DefaultRouterTest {
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.5");
         vitServerStatus.setHttpPort(8084);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
+        when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -452,10 +452,10 @@ class DefaultRouterTest {
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(false);
         vitServerStatus.setMessage("No vit worker available");
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
+        when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -482,17 +482,17 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRequestId(54321L);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.4");
         vitServerStatus.setHttpPort(8083);
         vitServerStatus.setRole(RoleType.VIT);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -524,24 +524,24 @@ class DefaultRouterTest {
         prefillServerStatus.setHttpPort(8080);
         prefillServerStatus.setGroup("group1");
         prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
+        when(prefillLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(true);
         decodeServerStatus.setServerIp("192.168.1.2");
         decodeServerStatus.setHttpPort(8081);
         decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.5");
         vitServerStatus.setHttpPort(8084);
         vitServerStatus.setRole(RoleType.VIT);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -565,8 +565,8 @@ class DefaultRouterTest {
         Request actualRequest = new Request();
         actualRequest.setRequestId(12345L);
         actualRequest.setSeqLen(10000L);
-        when(balanceContext.getRequest()).thenReturn(actualRequest);
-        when(groupRoutingPolicy.route(balanceContext)).thenReturn(GroupRoutingDecision.of("long-group", "long-context"));
+        when(flexlbRequest.getRequest()).thenReturn(actualRequest);
+        when(groupRoutingPolicy.route(flexlbRequest)).thenReturn(GroupRoutingDecision.of("long-group", "long-context"));
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(true);
@@ -574,7 +574,7 @@ class DefaultRouterTest {
         decodeServerStatus.setHttpPort(8081);
         decodeServerStatus.setGroup("long-group");
         decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"))).thenReturn(decodeServerStatus);
+        when(decodeLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.DECODE), eq("long-group"))).thenReturn(decodeServerStatus);
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(true);
@@ -582,15 +582,15 @@ class DefaultRouterTest {
         prefillServerStatus.setHttpPort(8080);
         prefillServerStatus.setGroup("long-group");
         prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"))).thenReturn(prefillServerStatus);
+        when(prefillLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PREFILL), eq("long-group"))).thenReturn(prefillServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        Response response = defaultRouter.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        verify(decodeLoadBalancer).select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"));
-        verify(prefillLoadBalancer).select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"));
+        verify(decodeLoadBalancer).select(any(FlexlbRequest.class), eq(RoleType.DECODE), eq("long-group"));
+        verify(prefillLoadBalancer).select(any(FlexlbRequest.class), eq(RoleType.PREFILL), eq("long-group"));
     }
 }

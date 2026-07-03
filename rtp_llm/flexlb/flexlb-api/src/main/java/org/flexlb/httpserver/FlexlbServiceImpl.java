@@ -2,7 +2,7 @@ package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -10,6 +10,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.FlexlbServiceGrpc;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.service.CancelRouter;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -22,6 +23,7 @@ import org.springframework.stereotype.Component;
 public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private final RouteService routeService;
+    private final CancelRouter cancelRouter;
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final EngineHealthReporter engineHealthReporter;
     private final ActiveRequestCounter activeRequestCounter;
@@ -33,8 +35,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              EngineHealthReporter engineHealthReporter,
                              ActiveRequestCounter activeRequestCounter,
                              FlexlbGrpcForwarder grpcForwarder,
-                             ConfigService configService) {
+                             ConfigService configService,
+                             CancelRouter cancelRouter) {
         this.routeService = routeService;
+        this.cancelRouter = cancelRouter;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.activeRequestCounter = activeRequestCounter;
@@ -47,26 +51,22 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                          StreamObserver<EngineRpcService.FlexlbScheduleResponsePB> responseObserver) {
         ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
         try {
-            BalanceContext ctx = buildContext(request);
-            engineHealthReporter.reportArriveDelayTime(ctx);
+            FlexlbRequest flexlbRequest = buildRequest(request);
+            engineHealthReporter.reportArriveDelayTime(flexlbRequest);
 
             EngineRpcService.FlexlbScheduleResponsePB response;
             if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
                 response = grpcForwarder.forwardToMaster(request);
                 if (response == null) {
-                    response = routeLocally(ctx);
+                    response = routeLocally(flexlbRequest);
                 }
             } else {
-                response = routeLocally(ctx);
+                response = routeLocally(flexlbRequest);
             }
 
             responseObserver.onNext(response);
             responseObserver.onCompleted();
-            ctx.setSuccess(response.getSuccess());
-            if (!response.getSuccess()) {
-                ctx.setErrorMessage(response.getErrorMessage());
-            }
-            engineHealthReporter.reportBalancingService(ctx);
+            engineHealthReporter.reportBalancingService(flexlbRequest);
         } catch (Exception e) {
             Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);
             EngineRpcService.FlexlbScheduleResponsePB errorResp = EngineRpcService.FlexlbScheduleResponsePB.newBuilder()
@@ -85,7 +85,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     public void cancel(EngineRpcService.CancelRequestPB request,
                        StreamObserver<EngineRpcService.EmptyPB> responseObserver) {
         try {
-            routeService.cancelByRequestId(request.getRequestId());
+            cancelRouter.cancel(request.getRequestId());
             responseObserver.onNext(EngineRpcService.EmptyPB.getDefaultInstance());
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -96,14 +96,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    private EngineRpcService.FlexlbScheduleResponsePB routeLocally(BalanceContext ctx) {
-        Response response = routeService.route(ctx).block();
+    private EngineRpcService.FlexlbScheduleResponsePB routeLocally(FlexlbRequest request) {
+        Response response = routeService.route(request).block();
         return toProtoResponse(response);
     }
 
-    private BalanceContext buildContext(EngineRpcService.FlexlbScheduleRequestPB pb) {
-        BalanceContext ctx = new BalanceContext();
-
+    private FlexlbRequest buildRequest(EngineRpcService.FlexlbScheduleRequestPB pb) {
         Request request = new Request();
         request.setRequestId(pb.getRequestId());
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());
@@ -116,14 +114,15 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
-        ctx.setRequest(request);
+
+        FlexlbRequest flexlbRequest = new FlexlbRequest(request);
 
         if (pb.hasGenerateInput()) {
-            ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());
+            flexlbRequest.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());
         }
 
-        ctx.setScheduleMode(resolveScheduleMode(pb.getScheduleMode(), configService.loadBalanceConfig()));
-        return ctx;
+        flexlbRequest.setScheduleMode(resolveScheduleMode(pb.getScheduleMode(), configService.loadBalanceConfig()));
+        return flexlbRequest;
     }
 
     private static ScheduleModeEnum resolveScheduleMode(EngineRpcService.FlexlbScheduleModePB mode,

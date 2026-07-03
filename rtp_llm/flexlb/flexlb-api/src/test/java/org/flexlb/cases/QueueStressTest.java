@@ -4,7 +4,6 @@ import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.http.MediaType;
@@ -61,7 +60,7 @@ public class QueueStressTest {
         try {
             Field queueField = QueueManager.class.getDeclaredField("queue");
             queueField.setAccessible(true);
-            BlockingDeque<BalanceContext> newQueue = new LinkedBlockingDeque<>(size);
+            BlockingDeque<QueueManager.QueueSlot> newQueue = new LinkedBlockingDeque<>(size);
             queueField.set(queueManager, newQueue);
             log.info("Queue reset to size: {}", size);
             return this;

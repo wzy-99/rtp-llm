@@ -4,7 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
@@ -37,7 +37,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final List<String> modelNames = new ArrayList<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final BatchScheduler batchScheduler;
     private final EndpointRegistry endpointRegistry;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
@@ -50,7 +50,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService localKvCacheAwareManager,
                                     @org.springframework.beans.factory.annotation.Autowired(required = false)
-                                    FlexlbBatchScheduler batchScheduler,
+                                    BatchScheduler batchScheduler,
                                     EndpointRegistry endpointRegistry) {
 
         super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig);

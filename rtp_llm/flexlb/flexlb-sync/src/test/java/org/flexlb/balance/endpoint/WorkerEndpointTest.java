@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -263,12 +263,11 @@ class WorkerEndpointTest {
         assertTrue(endpoint.getStatus().isAlive());
     }
 
-    private BalanceContext ctx(long requestId, long seqLen) {
+    private FlexlbRequest ctx(long requestId, long seqLen) {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(req);
+        FlexlbRequest ctx = new FlexlbRequest(req);
         return ctx;
     }
 

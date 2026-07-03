@@ -4,7 +4,7 @@ import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DispatchMeta;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -316,8 +316,7 @@ class PrefillEndpointTest {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
 
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(request);
+        FlexlbRequest ctx = new FlexlbRequest(request);
 
         ServerStatus prefill = new ServerStatus();
         prefill.setRole(RoleType.PREFILL);
@@ -328,13 +327,13 @@ class PrefillEndpointTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, null, null, prefill, null, endpoint, null, 0, System.currentTimeMillis());
+        return new BatchItem(ctx, null, prefill, null, endpoint, null, 0, System.currentTimeMillis());
     }
 
     private static BatchDecisionHandler noopHandler() {
         return new BatchDecisionHandler() {
             @Override public void onExpired(BatchItem head) {}
-            @Override public void onUrgent(BatchItem head, DispatchMeta meta) {}
+
             @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
             @Override public void onOfferFailure(BatchItem item, Throwable error) {}
         };

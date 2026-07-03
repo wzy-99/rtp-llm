@@ -5,7 +5,7 @@ import com.google.protobuf.Int64Value;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -109,7 +109,7 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem active = createBatchItem(1L, 500, 200, prefillEp);
         BatchItem cancelled = createBatchItem(2L, 300, 100, prefillEp);
-        cancelled.ctx().cancel(); // mark as cancelled
+        cancelled.cancel(); // mark as cancelled
 
         AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -226,7 +226,7 @@ class DefaultBatchDispatcherTest {
     private static BatchDecisionHandler noopHandler() {
         return new BatchDecisionHandler() {
             @Override public void onExpired(BatchItem head) {}
-            @Override public void onUrgent(BatchItem head, DispatchMeta meta) {}
+
             @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
             @Override public void onOfferFailure(BatchItem item, Throwable error) {}
         };
@@ -237,8 +237,7 @@ class DefaultBatchDispatcherTest {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
 
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(request);
+        FlexlbRequest req = new FlexlbRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
         EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
@@ -247,7 +246,7 @@ class DefaultBatchDispatcherTest {
                 .setGroupSize(1)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
                 .build();
-        ctx.setGenerateInputPbBytes(input.toByteArray());
+        req.setGenerateInputPbBytes(input.toByteArray());
 
         ServerStatus prefill = new ServerStatus();
         prefill.setRole(RoleType.PREFILL);
@@ -259,7 +258,7 @@ class DefaultBatchDispatcherTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null, prefillEp, null, 0, System.currentTimeMillis());
+        return new BatchItem(req, null, prefill, null, prefillEp, null, 0, System.currentTimeMillis());
     }
 
     private EngineRpcService.EnqueueBatchResponsePB ackResponse(List<Long> successIds) {

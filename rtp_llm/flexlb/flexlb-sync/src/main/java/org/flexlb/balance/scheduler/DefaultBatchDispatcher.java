@@ -93,7 +93,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         // Filter out items that were cancelled before dispatch
         List<BatchItem> active = new ArrayList<>();
         for (BatchItem item : items) {
-            if (!item.future().isDone() && !item.ctx().isCancelled()) {
+            if (!item.future().isDone() && !item.isCancelled()) {
                 active.add(item);
             } else {
                 Logger.debug("Skipping cancelled item in dispatch: request_id={}, batch_id={}",
@@ -215,7 +215,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private EngineRpcService.GenerateInputPB buildInput(long batchId, int groupSize, BatchItem item)
             throws InvalidProtocolBufferException {
-        byte[] bytes = item.ctx().getGenerateInputPbBytes();
+        byte[] bytes = item.generateInputPbBytes();
         if (bytes == null || bytes.length == 0) {
             throw new IllegalArgumentException("generateInputPbBytes is missing for request " + item.requestId());
         }

@@ -10,7 +10,7 @@ import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -57,20 +57,20 @@ public class DefaultRouter implements Router {
      * <p>This method implements the core routing logic for load balancing across different
      * worker types (Prefill, Decode, PDFusion, VIT).
      *
-     * @param balanceContext the context containing request information and model details
+     * @param request the FlexLB request containing request information and model details
      * @return Response containing selected server statuses or error information
      */
     @Override
-    public Response route(BalanceContext balanceContext) {
+    public Response route(FlexlbRequest request) {
         long startTimeInMicros = System.nanoTime() / 1000;
         // 1. Validate request
-        Response validationResponse = validateRequest(balanceContext);
+        Response validationResponse = validateRequest(request);
         if (validationResponse != null) {
             return validationResponse;
         }
 
         // 2. Get routing configuration
-        long requestId = balanceContext.getRequestId();
+        long requestId = request.getRequestId();
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
@@ -79,14 +79,14 @@ public class DefaultRouter implements Router {
         }
 
         // 3. Execute routing decision
-        RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
+        RoutingResult routingResult = routeByRoleType(request, roleTypeList);
 
         // 4. Build response based on routing result
         Response response;
         if (routingResult.success()) {
             response = buildSuccessResponse(requestId, routingResult.serverStatusList());
         } else {
-            rollBackRoutingFailure(balanceContext, routingResult);
+            rollBackRoutingFailure(request, routingResult);
             response = buildFailureResponse(requestId, routingResult);
         }
 
@@ -96,11 +96,11 @@ public class DefaultRouter implements Router {
     /**
      * Validates the incoming request and checks model availability.
      *
-     * @param balanceContext the context to validate
+     * @param request the FlexLB request to validate
      * @return error response if validation fails, null if validation succeeds
      */
-    private Response validateRequest(BalanceContext balanceContext) {
-        if (balanceContext.getRequest() == null) {
+    private Response validateRequest(FlexlbRequest request) {
+        if (request.getRequest() == null) {
             Logger.error("masterRequest is null");
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
@@ -116,23 +116,23 @@ public class DefaultRouter implements Router {
     /**
      * Execute routing decision, select optimal server for each role type
      *
-     * @param balanceContext Routing context
+     * @param request FlexLB request
      * @param roleTypeList List of required role types
      * @return Routing result
      */
-    public RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
+    public RoutingResult routeByRoleType(FlexlbRequest request, List<RoleType> roleTypeList) {
         List<ServerStatus> serverStatusList = new ArrayList<>();
-        GroupRoutingDecision groupRoutingDecision = groupRoutingPolicy.route(balanceContext);
+        GroupRoutingDecision groupRoutingDecision = groupRoutingPolicy.route(request);
         String policyGroup = groupRoutingDecision.group();
         String group = policyGroup;
         if (groupRoutingDecision.hasGroup()) {
             Logger.info("Group routing policy selected group, requestId: {}, policy: {}, group: {}",
-                    balanceContext.getRequestId(), groupRoutingDecision.policyName(), group);
+                    request.getRequestId(), groupRoutingDecision.policyName(), group);
         }
 
         for (RoleType roleType : roleTypeList) {
             LoadBalancer loadBalancer = getLoadBalancer(roleType);
-            ServerStatus serverStatus = loadBalancer.select(balanceContext, roleType, group);
+            ServerStatus serverStatus = loadBalancer.select(request, roleType, group);
 
             if (!serverStatus.isSuccess()) {
                 // Selection failed, return failure result
@@ -163,15 +163,15 @@ public class DefaultRouter implements Router {
      * Rollback handling for routing failure
      * If partial roles succeeded but subsequent roles failed, rollback local incremental updates for previously selected roles
      *
-     * @param balanceContext Routing context
+     * @param request FlexLB request
      * @param routingResult Routing result
      */
-    private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
+    private void rollBackRoutingFailure(FlexlbRequest request, RoutingResult routingResult) {
 
         List<ServerStatus> partialResults = routingResult.serverStatusList();
         for (ServerStatus serverStatus : partialResults) {
             String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            long requestId = balanceContext.getRequestId();
+            long requestId = request.getRequestId();
 
             WorkerEndpoint ep = endpointRegistry.get(serverIpPort);
             if (ep == null) {

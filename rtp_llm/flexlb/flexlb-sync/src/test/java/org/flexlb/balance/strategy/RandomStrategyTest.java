@@ -10,7 +10,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -94,8 +94,7 @@ class RandomStrategyTest {
     void should_return_error_when_no_workers_available() {
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
@@ -110,8 +109,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
@@ -130,8 +128,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
@@ -155,8 +152,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result1 = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
         ServerStatus result2 = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
@@ -179,8 +175,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus prefillResult = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
         ServerStatus decodeResult = randomStrategy.select(balanceContext, RoleType.DECODE, null);
@@ -198,8 +193,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-a");
 
@@ -215,8 +209,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-b");
 
@@ -249,8 +242,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         int totalRuns = 10000;
         Map<String, Integer> selectionCount = new HashMap<>();
@@ -294,8 +286,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         int totalRuns = 100;
         Map<String, Integer> selectionCount = new HashMap<>();
@@ -334,8 +325,7 @@ class RandomStrategyTest {
         req.setSeqLen(1000);
         req.setRequestId(12345L);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.DECODE, null);
 
@@ -355,8 +345,7 @@ class RandomStrategyTest {
         Request req = new Request();
         req.setSeqLen(1000);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
@@ -378,8 +367,7 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
+        FlexlbRequest balanceContext = new FlexlbRequest(req);
 
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 

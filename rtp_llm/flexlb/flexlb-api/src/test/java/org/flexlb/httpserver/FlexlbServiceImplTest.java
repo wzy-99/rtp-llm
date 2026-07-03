@@ -2,7 +2,8 @@ package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
+import org.flexlb.service.CancelRouter;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -23,6 +24,7 @@ import static org.mockito.Mockito.*;
 class FlexlbServiceImplTest {
 
     private RouteService routeService;
+    private CancelRouter cancelRouter;
     private LBStatusConsistencyService lbStatusConsistencyService;
     private EngineHealthReporter engineHealthReporter;
     private ActiveRequestCounter activeRequestCounter;
@@ -33,6 +35,7 @@ class FlexlbServiceImplTest {
     @BeforeEach
     void setUp() {
         routeService = mock(RouteService.class);
+        cancelRouter = mock(CancelRouter.class);
         lbStatusConsistencyService = mock(LBStatusConsistencyService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
         activeRequestCounter = mock(ActiveRequestCounter.class);
@@ -51,7 +54,8 @@ class FlexlbServiceImplTest {
                 engineHealthReporter,
                 activeRequestCounter,
                 grpcForwarder,
-                configService
+                configService,
+                cancelRouter
         );
     }
 
@@ -63,7 +67,7 @@ class FlexlbServiceImplTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(Mono.just(response));
+        when(routeService.route(any(FlexlbRequest.class))).thenReturn(Mono.just(response));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -131,7 +135,7 @@ class FlexlbServiceImplTest {
         Response localResponse = new Response();
         localResponse.setSuccess(true);
         localResponse.setCode(200);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(Mono.just(localResponse));
+        when(routeService.route(any(FlexlbRequest.class))).thenReturn(Mono.just(localResponse));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -144,7 +148,7 @@ class FlexlbServiceImplTest {
 
         // Then
         verify(grpcForwarder).forwardToMaster(request);
-        verify(routeService).route(any(BalanceContext.class));
+        verify(routeService).route(any(FlexlbRequest.class));
 
         ArgumentCaptor<EngineRpcService.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(EngineRpcService.FlexlbScheduleResponsePB.class);
@@ -158,7 +162,7 @@ class FlexlbServiceImplTest {
     void testSchedule_exceptionHandling() {
         // Given: route throws exception
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        when(routeService.route(any(BalanceContext.class))).thenThrow(new RuntimeException("test error"));
+        when(routeService.route(any(FlexlbRequest.class))).thenThrow(new RuntimeException("test error"));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -183,8 +187,8 @@ class FlexlbServiceImplTest {
 
     @Test
     void testCancel_success() {
-        // Given
-        doNothing().when(routeService).cancelByRequestId(12345L);
+        // Given — cancelRouter.cancel() returns boolean, default mock returns false (no throw)
+        // No stub needed; default mock behavior is sufficient for success path
 
         EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -196,7 +200,7 @@ class FlexlbServiceImplTest {
         service.cancel(request, observer);
 
         // Then
-        verify(routeService).cancelByRequestId(12345L);
+        verify(cancelRouter).cancel(12345L);
         verify(observer).onNext(any(EngineRpcService.EmptyPB.class));
         verify(observer).onCompleted();
         verify(observer, never()).onError(any());
@@ -205,7 +209,7 @@ class FlexlbServiceImplTest {
     @Test
     void testCancel_exceptionHandling() {
         // Given
-        doThrow(new RuntimeException("cancel error")).when(routeService).cancelByRequestId(12345L);
+        doThrow(new RuntimeException("cancel error")).when(cancelRouter).cancel(12345L);
 
         EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -217,7 +221,7 @@ class FlexlbServiceImplTest {
         service.cancel(request, observer);
 
         // Then
-        verify(routeService).cancelByRequestId(12345L);
+        verify(cancelRouter).cancel(12345L);
         verify(observer).onError(any());
         verify(observer, never()).onNext(any());
         verify(observer, never()).onCompleted();
@@ -232,7 +236,7 @@ class FlexlbServiceImplTest {
         response.setSuccess(true);
         response.setCode(200);
 
-        ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        ArgumentCaptor<FlexlbRequest> ctxCaptor = ArgumentCaptor.forClass(FlexlbRequest.class);
         when(routeService.route(ctxCaptor.capture())).thenReturn(Mono.just(response));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
@@ -249,7 +253,7 @@ class FlexlbServiceImplTest {
         service.schedule(request, observer);
 
         // Then: verify cacheKeyBlockSize is propagated to Request
-        BalanceContext capturedCtx = ctxCaptor.getValue();
+        FlexlbRequest capturedCtx = ctxCaptor.getValue();
         Request capturedRequest = capturedCtx.getRequest();
         assertEquals(1024L, capturedRequest.getCacheKeyBlockSize());
         assertEquals(2, capturedRequest.getBlockCacheKeys().size());

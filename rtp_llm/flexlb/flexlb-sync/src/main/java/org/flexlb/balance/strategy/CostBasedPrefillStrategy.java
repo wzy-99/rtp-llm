@@ -8,7 +8,7 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -48,9 +48,9 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
+    public ServerStatus select(FlexlbRequest request, RoleType roleType, String group) {
         try {
-            return doSelect(balanceContext, roleType, group);
+            return doSelect(request, roleType, group);
         } catch (Exception e) {
             Logger.warn("CostBasedPrefillStrategy select failed", e);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -60,16 +60,16 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
+        // Batch path inflight is managed by BatchScheduler — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
             pe.releaseBatch(requestId);
         }
     }
 
-    private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        long requestId = balanceContext.getRequestId();
-        long seqLen = balanceContext.getRequest().getSeqLen();
-        FlexlbConfig config = balanceContext.getConfig();
+    private ServerStatus doSelect(FlexlbRequest request, RoleType roleType, String group) {
+        long requestId = request.getRequestId();
+        long seqLen = request.getRequest().getSeqLen();
+        FlexlbConfig config = request.getConfig();
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
         List<PrefillEndpoint> eligible = filterResult.endpoints();
@@ -79,7 +79,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
+        Map<String, Integer> cacheMatchResults = getCacheMatchResults(request, roleType, group);
 
         FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config, cacheMatchResults);
         List<PrefillEndpoint> survivors = hardFilterResult.endpoints();
@@ -109,7 +109,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
         reportCacheHitMetrics(roleType, best.getIp(), bestCacheHit, seqLen);
 
-        return buildServerStatus(best, roleType, requestId, bestScore, config, balanceContext, bestCacheHit);
+        return buildServerStatus(best, roleType, requestId, bestScore, config, request, bestCacheHit);
     }
 
     private record EndpointFilterResult(List<PrefillEndpoint> endpoints, Map<String, Integer> rejections) {}
@@ -222,8 +222,8 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         return new EndpointFilterResult(result, rejections);
     }
 
-    private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
+    private Map<String, Integer> getCacheMatchResults(FlexlbRequest request, RoleType roleType, String group) {
+        List<Long> blockCacheKeys = request.getRequest().getBlockCacheKeys();
         return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
     }
 
@@ -249,12 +249,12 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
-                                            FlexlbConfig config, BalanceContext balanceContext,
+                                            FlexlbConfig config, FlexlbRequest request,
                                             long bestCacheHit) {
         // Non-batch path: reserve prefill inflight for load-aware scoring.
-        // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (isNonBatchPath(config, balanceContext)) {
-            ep.commitBatch(requestId, score, Collections.emptyList());
+        // Batch path uses BatchDispatchCoordinator.flushItems() instead — skip here to avoid double-counting.
+        if (isNonBatchPath(config, request)) {
+            ep.commitBatch(requestId, score, Collections.emptyMap());
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
@@ -277,10 +277,10 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
     /**
      * Whether batch dispatching is globally disabled.
-     * <p>When batch is enabled, FlexlbBatchScheduler handles all inflight tracking;
+     * <p>When batch is enabled, BatchScheduler handles all inflight tracking;
      * placeholders are only needed when batch is fully off ({@code flexlbBatchEnabled=false}).
      */
-    private static boolean isNonBatchPath(FlexlbConfig config, BalanceContext ctx) {
+    private static boolean isNonBatchPath(FlexlbConfig config, FlexlbRequest request) {
         return !config.isFlexlbBatchEnabled();
     }
 }

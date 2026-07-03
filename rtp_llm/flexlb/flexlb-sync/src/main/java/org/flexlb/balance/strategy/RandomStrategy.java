@@ -7,7 +7,7 @@ import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -47,8 +47,8 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        Request request = balanceContext.getRequest();
+    public ServerStatus select(FlexlbRequest request, RoleType roleType, String group) {
+        Request masterRequest = request.getRequest();
         logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
 
         Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
@@ -69,7 +69,7 @@ public class RandomStrategy implements LoadBalancer {
         WorkerEndpoint selectedWorker = null;
         for (int i = 0; i < size; i++) {
             WorkerEndpoint ep = endpoints.get((startIndex + i) % size);
-            if (isWorkerAvailable(balanceContext, roleType, ep)) {
+            if (isWorkerAvailable(request, roleType, ep)) {
                 selectedWorker = ep;
                 break;
             }
@@ -80,16 +80,16 @@ public class RandomStrategy implements LoadBalancer {
         }
 
         logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getHttpPort());
-        return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId(), request);
+        return buildServerStatus(selectedWorker, roleType, request.getRequestId(), masterRequest);
     }
 
-    private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerEndpoint ep) {
+    private boolean isWorkerAvailable(FlexlbRequest request, RoleType roleType, WorkerEndpoint ep) {
         if (ep == null || !ep.getStatus().isAlive()) {
             return false;
         }
 
-        FlexlbConfig config = balanceContext.getConfig() != null
-                ? balanceContext.getConfig()
+        FlexlbConfig config = request.getConfig() != null
+                ? request.getConfig()
                 : configService.loadBalanceConfig();
         ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);

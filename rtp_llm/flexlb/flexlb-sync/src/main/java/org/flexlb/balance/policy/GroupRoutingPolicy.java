@@ -1,8 +1,8 @@
 package org.flexlb.balance.policy;
 
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 
 public interface GroupRoutingPolicy {
 
-    GroupRoutingDecision route(BalanceContext balanceContext);
+    GroupRoutingDecision route(FlexlbRequest request);
 }

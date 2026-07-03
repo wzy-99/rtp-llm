@@ -4,7 +4,7 @@ import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -47,32 +47,32 @@ public class RecentCacheKeyTraceReporter {
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
 
-    public void report(BalanceContext balanceContext) {
-        if (balanceContext == null) {
+    public void report(FlexlbRequest request) {
+        if (request == null) {
             return;
         }
-        FlexlbConfig config = balanceContext.getConfig();
+        FlexlbConfig config = request.getConfig();
         if (config != null && !config.isCacheHitWindowWriteEnabled()) {
             return;
         }
 
-        Request request = balanceContext.getRequest();
-        if (request == null || recentCacheKeyWindow == null) {
+        Request masterRequest = request.getRequest();
+        if (masterRequest == null || recentCacheKeyWindow == null) {
             return;
         }
 
-        List<Long> cacheKeys = request.getBlockCacheKeys();
+        List<Long> cacheKeys = masterRequest.getBlockCacheKeys();
         RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(cacheKeys);
-        long inputTokens = Math.max(0L, request.getSeqLen());
+        long inputTokens = Math.max(0L, masterRequest.getSeqLen());
         long hitTokens = theoryHitTokens(
                 snapshot.getRequestHitOccurrences(),
                 inputTokens,
-                request.getCacheKeyBlockSize());
+                masterRequest.getCacheKeyBlockSize());
         CacheHitTheoryStats.Snapshot theorySnapshot = theoryStats.record(
                 hitTokens,
                 inputTokens);
-        logTraceIfEnabled(balanceContext, request, snapshot, hitTokens, inputTokens, config);
-        logTheoryIfEnabled(balanceContext, request, theorySnapshot, config);
+        logTraceIfEnabled(request, masterRequest, snapshot, hitTokens, inputTokens, config);
+        logTheoryIfEnabled(request, masterRequest, theorySnapshot, config);
 
         if (cacheMetricsReporter == null || (config != null && !config.isCacheHitMetricReportEnabled())) {
             return;
@@ -95,8 +95,8 @@ public class RecentCacheKeyTraceReporter {
         return Math.min(inputTokens, hitTokens);
     }
 
-    private void logTraceIfEnabled(BalanceContext balanceContext,
-                                   Request request,
+    private void logTraceIfEnabled(FlexlbRequest request,
+                                   Request masterRequest,
                                    RecentCacheKeyWindow.Snapshot snapshot,
                                    long hitTokens,
                                    long inputTokens,
@@ -104,15 +104,15 @@ public class RecentCacheKeyTraceReporter {
         if (config == null || !config.isCacheHitTraceLogEnabled()) {
             return;
         }
-        List<Long> cacheKeys = request.getBlockCacheKeys();
+        List<Long> cacheKeys = masterRequest.getBlockCacheKeys();
         Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, retryCount={}, "
                         + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
                         + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
-                balanceContext.getRequestId(),
                 request.getRequestId(),
-                balanceContext.getRetryCount(),
-                request.getSeqLen(),
-                request.getRequestTimeMs(),
+                masterRequest.getRequestId(),
+                0,
+                masterRequest.getSeqLen(),
+                masterRequest.getRequestTimeMs(),
                 snapshot.getRequestOccurrences(),
                 snapshot.getRequestHitOccurrences(),
                 hitRatio(snapshot.getRequestHitOccurrences(), snapshot.getRequestOccurrences()),
@@ -120,7 +120,7 @@ public class RecentCacheKeyTraceReporter {
                 inputTokens,
                 hitRatio(hitTokens, inputTokens),
                 cacheKeyDigest(cacheKeys),
-                formatServerStatusList(balanceContext.getResponse()),
+                formatServerStatusList(request.getResponse()),
                 formatCacheKeys(cacheKeys));
     }
 
@@ -131,8 +131,8 @@ public class RecentCacheKeyTraceReporter {
         return (double) hitCount / totalCount;
     }
 
-    private void logTheoryIfEnabled(BalanceContext balanceContext,
-                                    Request request,
+    private void logTheoryIfEnabled(FlexlbRequest request,
+                                    Request masterRequest,
                                     CacheHitTheoryStats.Snapshot snapshot,
                                     FlexlbConfig config) {
         if (config == null || !config.isCacheHitTheoryLogEnabled()) {
@@ -141,11 +141,11 @@ public class RecentCacheKeyTraceReporter {
         if (snapshot == null || snapshot.getRequestTotalCount() <= 0L) {
             return;
         }
-        writeTheoryLogLine(formatTheoryLogLine(balanceContext, request, snapshot));
+        writeTheoryLogLine(formatTheoryLogLine(request, masterRequest, snapshot));
     }
 
-    private static String formatTheoryLogLine(BalanceContext balanceContext,
-                                              Request request,
+    private static String formatTheoryLogLine(FlexlbRequest request,
+                                              Request masterRequest,
                                               CacheHitTheoryStats.Snapshot snapshot) {
         return String.format(Locale.ROOT,
                 "time=%s ts_ms=%d source=master master_request_id=%s request_id=%d seq_len=%d "
@@ -153,10 +153,10 @@ public class RecentCacheKeyTraceReporter {
                         + "all_hit_tokens=%d all_input_tokens=%d all_ratio=%.6f",
                 formatTimestamp(snapshot.getNowMs()),
                 snapshot.getNowMs(),
-                balanceContext == null ? "" : String.valueOf(balanceContext.getRequestId()),
-                request == null ? 0L : request.getRequestId(),
-                request == null ? 0L : request.getSeqLen(),
-                request == null ? 0L : request.getCacheKeyBlockSize(),
+                request == null ? "" : String.valueOf(request.getRequestId()),
+                masterRequest == null ? 0L : masterRequest.getRequestId(),
+                masterRequest == null ? 0L : masterRequest.getSeqLen(),
+                masterRequest == null ? 0L : masterRequest.getCacheKeyBlockSize(),
                 snapshot.getRequestHitCount(),
                 snapshot.getRequestTotalCount(),
                 snapshot.getRequestHitRatio(),

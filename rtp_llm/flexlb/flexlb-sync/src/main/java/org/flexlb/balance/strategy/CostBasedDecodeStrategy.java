@@ -7,7 +7,7 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -49,16 +49,16 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
     }
 
     @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        Request request = balanceContext.getRequest();
-        long seqLen = request.getSeqLen();
-        FlexlbConfig config = balanceContext.getConfig();
+    public ServerStatus select(FlexlbRequest request, RoleType roleType, String group) {
+        Request masterRequest = request.getRequest();
+        long seqLen = masterRequest.getSeqLen();
+        FlexlbConfig config = request.getConfig();
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
         List<DecodeEndpoint> eligible = filterResult.endpoints();
         if (CollectionUtils.isEmpty(eligible)) {
             Logger.warn("Decode select failed: no available endpoints, request_id={}, rejections={}",
-                    balanceContext.getRequestId(), filterResult.rejections());
+                    request.getRequestId(), filterResult.rejections());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
@@ -68,14 +68,14 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
-            long prefixLength = calcPrefixMatchLength(selectedEndpoint.getStatus().getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
-            return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, balanceContext.getRequestId());
+            long prefixLength = calcPrefixMatchLength(selectedEndpoint.getStatus().getCacheStatus(), request.getRequest().getBlockCacheKeys());
+            return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, request.getRequestId());
         }
 
         Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
         hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
         Logger.warn("Decode select failed: all filtered out, request_id={}, rejections={}",
-                balanceContext.getRequestId(), merged);
+                request.getRequestId(), merged);
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
     }
 

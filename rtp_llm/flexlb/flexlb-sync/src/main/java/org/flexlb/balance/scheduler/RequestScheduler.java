@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.util.Logger;
@@ -92,14 +92,14 @@ public class RequestScheduler {
 
                 try {
                     // Step 2: Take request from queue
-                    BalanceContext ctx = queueManager.takeRequest(true, 500);
-                    if (ctx == null) {
+                    QueueManager.QueueSlot slot = queueManager.takeRequest(true, 500);
+                    if (slot == null) {
                         continue; // permit released in finally
                     }
 
                     // Step 3: Process request
-                    Logger.debug("Worker processing request id: {}", ctx.getRequestId());
-                    processRequest(ctx);
+                    Logger.debug("Worker processing request id: {}", slot.getRequest().getRequestId());
+                    processRequest(slot);
                 } finally {
                     dynamicWorkerManager.releasePermit();
                 }
@@ -111,35 +111,38 @@ public class RequestScheduler {
         Logger.info("Worker thread stopped");
     }
 
-    private void processRequest(BalanceContext ctx) {
+    private void processRequest(QueueManager.QueueSlot slot) {
+        FlexlbRequest request = slot.getRequest();
         try {
-            Response response = router.route(ctx);
-            handleRoutingResult(ctx, response);
+            Response response = router.route(request);
+            handleRoutingResult(slot, response);
         } catch (Exception e) {
-            Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), e);
-            ctx.getFuture().completeExceptionally(e);
+            Logger.error("Worker thread failed to route ctx id:{}", request.getRequestId(), e);
+            request.getFuture().completeExceptionally(e);
         }
     }
 
-    private void handleRoutingResult(BalanceContext ctx, Response response) {
-        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
-        boolean retryAllowed = maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
+    private void handleRoutingResult(QueueManager.QueueSlot slot, Response response) {
+        FlexlbRequest request = slot.getRequest();
+        FlexlbConfig config = configService.loadBalanceConfig();
+        int maxRetry = config.getMaxRetryCount();
+        boolean retryAllowed = maxRetry <= 0 || slot.getRetryCount().get() < maxRetry;
         if (!response.isSuccess() && shouldRetry(response) && retryAllowed) {
-            ctx.incrementRetryCount();
+            slot.incrementRetryCount();
             Logger.warn("Route failed for request id:{}, error: {}, retry count: {}",
-                    ctx.getRequestId(),
+                    request.getRequestId(),
                     response.getCode(),
-                    ctx.getRetryCount());
+                    slot.getRetryCount().get());
             metrics.reportRoutingFailureQps(response.getCode());
 
-            queueManager.offerToHead(ctx);
+            queueManager.offerToHead(slot);
         } else {
             if (!response.isSuccess() && !retryAllowed) {
                 Logger.warn("Max retry count ({}) exceeded for request id:{}, completing with error",
-                        maxRetry, ctx.getRequestId());
+                        maxRetry, request.getRequestId());
             }
-            ctx.getFuture().complete(response);
-            metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+            request.getFuture().complete(response);
+            metrics.reportRoutingSuccessQps(slot.getRetryCount().get());
         }
     }
 

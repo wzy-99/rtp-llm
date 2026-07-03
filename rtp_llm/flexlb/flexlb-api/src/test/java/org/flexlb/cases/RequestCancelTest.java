@@ -4,7 +4,7 @@ import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.service.RouteService;
+import org.flexlb.service.CancelRouter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.mockito.ArgumentMatchers;
 import org.springframework.http.MediaType;
@@ -31,19 +31,19 @@ public class RequestCancelTest {
 
     private final WebClient webClient;
     private final ConfigService configService;
-    private final RouteService routeService;
+    private final CancelRouter cancelRouter;
 
-    private RequestCancelTest(WebClient webClient, ConfigService configService, RouteService routeService) {
+    private RequestCancelTest(WebClient webClient, ConfigService configService, CancelRouter cancelRouter) {
         this.webClient = webClient;
         this.configService = configService;
-        this.routeService = routeService;
+        this.cancelRouter = cancelRouter;
     }
 
-    public static RequestCancelTest init(EnvironmentVariables environmentVariables, ConfigService configService, RouteService routeService) {
+    public static RequestCancelTest init(EnvironmentVariables environmentVariables, ConfigService configService, CancelRouter cancelRouter) {
         environmentVariables.set("DOMAIN_ADDRESS:com.prefill.hosts.address", "127.0.0.100:8080,127.0.0.101:8080");
         environmentVariables.set("DOMAIN_ADDRESS:com.decode.hosts.address", "127.0.0.102:8080,127.0.0.103:8080");
         WebClient webClient = WebClient.builder().baseUrl("http://localhost:7001").build();
-        return new RequestCancelTest(webClient, configService, routeService);
+        return new RequestCancelTest(webClient, configService, cancelRouter);
     }
 
     /**
@@ -51,7 +51,7 @@ public class RequestCancelTest {
      *   1. Set Worker remaining memory to 10, forcing requests into queue
      *   2. Send request and subscribe to response stream
      *   3. Call dispose() to cancel subscription after 3 seconds
-     *   4. Trigger server-side doOnCancel() → RouteService.cancel()
+     *   4. Trigger server-side doOnCancel() → CancelRouter.cancel()
      *   5. Verify error code 8504 (REQUEST_CANCELLED) is returned
      */
     @SuppressWarnings("ResultOfMethodCallIgnored")
@@ -113,9 +113,9 @@ public class RequestCancelTest {
 
             log.info("response: {}", response);
             Thread.sleep(1000);
-            // Verify routeService.cancel() is called once
-            verify(routeService).cancel(ArgumentMatchers.any());
-            log.info("routeService.cancel() called once");
+            // Verify cancelRouter.cancel() is called once
+            verify(cancelRouter).cancel(ArgumentMatchers.anyLong());
+            log.info("cancelRouter.cancel() called once");
 
         } finally {
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();

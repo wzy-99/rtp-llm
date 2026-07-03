@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -34,7 +34,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final WorkerStatus workerStatus;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final BatchScheduler batchScheduler;
     private final String ip;
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
@@ -48,7 +48,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
-                                  FlexlbBatchScheduler batchScheduler,
+                                  BatchScheduler batchScheduler,
                                   EndpointRegistry endpointRegistry) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");

@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -49,7 +49,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
-    private final FlexlbBatchScheduler batchScheduler;
+    private final BatchScheduler batchScheduler;
 
     private final EndpointRegistry endpointRegistry;
 
@@ -64,7 +64,7 @@ public class EngineSyncRunner implements Runnable {
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
-                            FlexlbBatchScheduler batchScheduler,
+                            BatchScheduler batchScheduler,
                             EndpointRegistry endpointRegistry) {
 
         this.modelName = modelName;

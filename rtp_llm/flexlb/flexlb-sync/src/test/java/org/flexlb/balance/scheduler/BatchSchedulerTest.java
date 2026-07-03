@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -15,14 +15,12 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -30,7 +28,6 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -42,14 +39,15 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class FlexlbBatchSchedulerTest {
+class BatchSchedulerTest {
 
     private ConfigService configService;
     private Router router;
     private EngineGrpcClient grpcClient;
-    private EngineWorkerStatus engineWorkerStatus;
     private BatchSchedulerReporter reporter;
-    private FlexlbBatchScheduler scheduler;
+    private BatchScheduler scheduler;
+    private EndpointRegistry endpointRegistry;
+    private DefaultBatchDispatcher dispatcher;
     private FlexlbConfig config;
     private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
     private final List<String> sentEndpoints = new CopyOnWriteArrayList<>();
@@ -59,7 +57,6 @@ class FlexlbBatchSchedulerTest {
         configService = mock(ConfigService.class);
         router = mock(Router.class);
         grpcClient = mock(EngineGrpcClient.class);
-        engineWorkerStatus = mock(EngineWorkerStatus.class);
         reporter = mock(BatchSchedulerReporter.class);
 
         config = new FlexlbConfig();
@@ -71,9 +68,9 @@ class FlexlbBatchSchedulerTest {
         config.setFlexlbBatchFillThreshold(1.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            return successRoute(ctx.getRequestId());
+        when(router.route(any(FlexlbRequest.class))).thenAnswer(inv -> {
+            FlexlbRequest req = inv.getArgument(0);
+            return successRoute(req.getRequestId());
         });
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
@@ -85,10 +82,15 @@ class FlexlbBatchSchedulerTest {
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
-        EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null, reporter);
-        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
-        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
-                endpointRegistry, dispatcher, reporter);
+        // Wire up all components
+        BatchInflightStore store = new BatchInflightStore();
+        CleanupCoordinator cleanupCoordinator = new CleanupCoordinator(grpcClient, configService);
+        DispatchResultHandler dispatchResultHandler = new DispatchResultHandler(store, cleanupCoordinator);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
+        BatchDispatchCoordinator batchDispatchCoordinator = new BatchDispatchCoordinator(
+                dispatcher, store, cleanupCoordinator, reporter, dispatchResultHandler);
+        endpointRegistry = new EndpointRegistry(configService, batchDispatchCoordinator, reporter);
+        scheduler = new BatchScheduler(configService, router, endpointRegistry, store, cleanupCoordinator);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -96,7 +98,7 @@ class FlexlbBatchSchedulerTest {
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
         ws.setGrpcPort(9080);
-        PrefillEndpoint endpoint = new PrefillEndpoint(ws, config, scheduler, reporter);
+        PrefillEndpoint endpoint = new PrefillEndpoint(ws, config, batchDispatchCoordinator, reporter);
         ServerStatus prefill = new ServerStatus();
         prefill.setServerIp("10.0.0.1");
         prefill.setHttpPort(8080);
@@ -108,6 +110,7 @@ class FlexlbBatchSchedulerTest {
     @AfterEach
     void tearDown() {
         scheduler.shutdown();
+        dispatcher.shutdown();
     }
 
     @Test
@@ -144,9 +147,9 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void submit_groups_batch_payload_by_dp_rank() throws Exception {
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            long requestId = ctx.getRequestId();
+        when(router.route(any(FlexlbRequest.class))).thenAnswer(inv -> {
+            FlexlbRequest req = inv.getArgument(0);
+            long requestId = req.getRequestId();
             return successRouteWithPrefillDp(requestId, requestId == 71L ? 0 : 1);
         });
 
@@ -167,7 +170,6 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void batch_enqueue_error_list_fails_only_rejected_request() throws Exception {
-        // Use request IDs to match, not input positions
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
@@ -204,7 +206,6 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void batch_enqueue_missing_success_fails_missing_request() throws Exception {
-        // Only return success for request 83, missing ack for 84
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     sentEndpoints.add(inv.getArgument(0) + ":" + inv.getArgument(1));
@@ -235,16 +236,7 @@ class FlexlbBatchSchedulerTest {
     @Test
     void dispatch_falls_back_to_selected_prefill_when_dp0_status_not_synced() throws Exception {
         config.setFlexlbBatchSizeMax(1);
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> successRouteWithPrefillDp(92, 1));
-
-        WorkerStatus unsyncedDp0 = new WorkerStatus();
-        unsyncedDp0.setIp("10.0.0.9");
-        unsyncedDp0.setPort(8090);
-        unsyncedDp0.setGrpcPort(9090);
-        unsyncedDp0.setDpRank(0);
-        PrefillEndpoint unsyncedEp = new PrefillEndpoint(unsyncedDp0, config, scheduler, reporter);
-        when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
-                .thenReturn(Map.of("10.0.0.9:8090", unsyncedEp));
+        when(router.route(any(FlexlbRequest.class))).thenAnswer(inv -> successRouteWithPrefillDp(92, 1));
 
         Response response = scheduler.submit(context(92)).get(2, TimeUnit.SECONDS);
 
@@ -300,7 +292,7 @@ class FlexlbBatchSchedulerTest {
     @Test
     void route_failure_completes_without_batch_enqueue() throws Exception {
         Response failure = Response.error(StrategyErrorType.NO_PREFILL_WORKER);
-        when(router.route(any(BalanceContext.class))).thenReturn(failure);
+        when(router.route(any(FlexlbRequest.class))).thenReturn(failure);
 
         Response response = scheduler.submit(context(21)).get(1, TimeUnit.SECONDS);
 
@@ -350,10 +342,6 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void processQueue_park_converges_to_urgent_dispatch() throws Exception {
-        // budget = sloMs(300) - predMs(128) = 172ms, margin = 100ms
-        // fillThreshold=2.0 → fillRatio can never reach it (max 1.0)
-        // batchSizeMax=1000 → single request can't trigger size condition
-        // So request parks, budget shrinks each 1ms iteration, after ~72ms budget < margin → urgent dispatch
         config.setCostSloMs(300L);
         config.setCostSloRiskMarginMs(100L);
         config.setFlexlbBatchFillThreshold(2.0);
@@ -368,9 +356,6 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void processQueue_fillRatio_triggers_dispatch() throws Exception {
-        // budget = sloMs(500) - predMs(128) = 372ms, margin = 50ms
-        // fillRatio = 128/322 ≈ 0.40 >= threshold(0.3) → dispatches immediately via fillRatio
-        // batchSizeMax=1000 ensures size condition is NOT the trigger
         config.setCostSloMs(500L);
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(500);
@@ -386,11 +371,6 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void processQueue_bsIter_exhaustion_uses_conservative_bound() throws Exception {
-        // With slo_budget batcher (default), two 100-token requests each have
-        // budget ≈ 350ms (slo=500, margin=50, pred≈100). Both fit within the
-        // incremental budget and are dispatched together in a single batch.
-        // flexlbBatchSearchIter is NOT used by slo_budget; flexlbBatchScanAhead
-        // (default 64) determines how many candidates are scanned per iteration.
         config.setCostSloMs(500L);
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(100000);
@@ -403,7 +383,6 @@ class FlexlbBatchSchedulerTest {
         assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
 
-        // Both requests fit within the incremental budget → 1 combined batch
         assertEquals(1, sentBatches.size(),
                 "slo_budget dispatches both requests together when they fit within budget");
         assertEquals(2, batchInputs(sentBatches.get(0)).size());
@@ -447,9 +426,6 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void dynamic_slo_prevents_drop_for_requests_exceeding_fixed_slo() throws Exception {
-        // With default costSloMs=500 and alpha1=1.0, a 600-token request has
-        // predMs=600 > sloMs=500 → budget=0 → immediate drop.
-        // With buckets "1000:5000,...", sloMs=5000 → budget=4400 → enough to batch.
         config.setCostSloBuckets("1000:5000,100000:50000");
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchSizeMax(2);
@@ -485,7 +461,7 @@ class FlexlbBatchSchedulerTest {
         decodeStatus.setIp("10.0.0.2");
         decodeStatus.setPort(8081);
         decodeStatus.setGrpcPort(9081);
-        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
+        DecodeEndpoint decodeEp = endpointRegistry.ensureDecodeEndpoint(
                 "10.0.0.2:8081", decodeStatus);
 
         // Simulate strategy having reserved resources on the decode endpoint
@@ -505,7 +481,6 @@ class FlexlbBatchSchedulerTest {
         assertTrue(future.isDone());
         assertFalse(future.getNow(null).isSuccess());
     }
-
 
     @Test
     void cancel_with_decode_endpoint_not_registered_is_noop() throws Exception {
@@ -539,11 +514,11 @@ class FlexlbBatchSchedulerTest {
                 .toList();
     }
 
-    private static BalanceContext context(long requestId) {
+    private static FlexlbRequest context(long requestId) {
         return context(requestId, requestId);
     }
 
-    private static BalanceContext context(long requestId, long generateInputRequestId) {
+    private static FlexlbRequest context(long requestId, long generateInputRequestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);
@@ -551,14 +526,13 @@ class FlexlbBatchSchedulerTest {
         request.setNumBeams(1);
         request.setModel("test-model");
 
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(request);
-        ctx.setConfig(new FlexlbConfig());
-        ctx.setGenerateInputPbBytes(generateInputBytes(generateInputRequestId));
-        return ctx;
+        FlexlbRequest req = new FlexlbRequest(request);
+        req.setConfig(new FlexlbConfig());
+        req.setGenerateInputPbBytes(generateInputBytes(generateInputRequestId));
+        return req;
     }
 
-    private static BalanceContext contextWithSeqLen(long requestId, long seqLen) {
+    private static FlexlbRequest contextWithSeqLen(long requestId, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -566,11 +540,10 @@ class FlexlbBatchSchedulerTest {
         request.setNumBeams(1);
         request.setModel("test-model");
 
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(request);
-        ctx.setConfig(new FlexlbConfig());
-        ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
-        return ctx;
+        FlexlbRequest req = new FlexlbRequest(request);
+        req.setConfig(new FlexlbConfig());
+        req.setGenerateInputPbBytes(generateInputBytes(requestId));
+        return req;
     }
 
     private static byte[] generateInputBytes(long requestId) {

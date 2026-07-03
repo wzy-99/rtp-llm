@@ -8,7 +8,7 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -290,22 +290,22 @@ public class EngineHealthReporter {
         }
     }
 
-    public void reportBalancingService(BalanceContext ctx) {
-        if (ctx == null || ctx.getResponse() == null) {
+    public void reportBalancingService(FlexlbRequest request) {
+        if (request == null || request.getResponse() == null) {
             return;
         }
 
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "code", String.valueOf(ctx.getResponse().getCode()));
+                "code", String.valueOf(request.getResponse().getCode()));
         monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
-        monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, System.currentTimeMillis() - ctx.getStartTime());
+        monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, System.currentTimeMillis() - request.getStartTime());
 
         // Report server status selection results (distinguished by roleType and ip)
-        if (ctx.getResponse() != null && CollectionUtils.isNotEmpty(ctx.getResponse().getServerStatus())) {
-            boolean isSuccess = ctx.getResponse().isSuccess();
-            int code = ctx.getResponse().getCode();
+        if (request.getResponse() != null && CollectionUtils.isNotEmpty(request.getResponse().getServerStatus())) {
+            boolean isSuccess = request.getResponse().isSuccess();
+            int code = request.getResponse().getCode();
 
-            for (ServerStatus serverStatus : ctx.getResponse().getServerStatus()) {
+            for (ServerStatus serverStatus : request.getResponse().getServerStatus()) {
                 if (serverStatus.getRole() != null && serverStatus.getServerIp() != null) {
                     // Report specific server selection QPS
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
@@ -388,11 +388,11 @@ public class EngineHealthReporter {
         cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(roleType, engineIp, hitTokens, totalTokens);
     }
 
-    public void reportArriveDelayTime(BalanceContext ctx) {
-        if (ctx.getRequest().getRequestTimeMs() == 0) {
+    public void reportArriveDelayTime(FlexlbRequest request) {
+        if (request.getRequest().getRequestTimeMs() == 0) {
             return;
         }
-        long arrivalDelayMs = ctx.getStartTime() - ctx.getRequest().getRequestTimeMs();
+        long arrivalDelayMs = request.getStartTime() - request.getRequest().getRequestTimeMs();
         monitor.report(REQUEST_ARRIVAL_DELAY_MS, FlexMetricTags.of(), arrivalDelayMs);
     }
 
