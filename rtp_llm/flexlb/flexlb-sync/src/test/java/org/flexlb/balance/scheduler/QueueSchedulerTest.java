@@ -6,6 +6,7 @@ import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,27 +23,27 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class QueueManagerTest {
+class QueueSchedulerTest {
 
     @Mock
     private RoutingQueueReporter metrics;
     @Mock
     private ConfigService configService;
 
-    private QueueManager queueManager;
+    private QueueScheduler queueManager;
 
     @BeforeEach
     void setUp() {
         FlexlbConfig config = new FlexlbConfig();
         config.setMaxQueueSize(10);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        queueManager = new QueueManager(metrics, configService);
+        queueManager = new QueueScheduler(metrics, configService);
     }
 
     @Test
-    void tryRouteAsync_shouldEnqueueSuccessfully() {
+    void dispatch_shouldEnqueueSuccessfully() {
         FlexlbRequest request = createRequest(1L);
-        var mono = queueManager.tryRouteAsync(request);
+        var mono = queueManager.dispatch(request);
 
         assertNotNull(mono);
         assertNotNull(request.getFuture());
@@ -50,15 +51,15 @@ class QueueManagerTest {
     }
 
     @Test
-    void tryRouteAsync_shouldRejectWhenQueueFull() {
+    void dispatch_shouldRejectWhenQueueFull() {
         // Fill the queue
         for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createRequest(i));
+            queueManager.dispatch(createRequest(i));
         }
 
         // 11th request should be rejected
         FlexlbRequest request = createRequest(11L);
-        Response response = queueManager.tryRouteAsync(request).block();
+        Response response = queueManager.dispatch(request).block();
 
         assertNotNull(response);
         assertFalse(response.isSuccess());
@@ -68,16 +69,16 @@ class QueueManagerTest {
 
     @Test
     void takeRequest_shouldReturnNullWhenEmpty() {
-        QueueManager.QueueSlot result = queueManager.takeRequest(false, 0);
+        QueueScheduler.QueueSlot result = queueManager.takeRequest(false, 0);
         assertNull(result);
     }
 
     @Test
     void takeRequest_shouldReturnEnqueuedRequest() {
         FlexlbRequest request = createRequest(1L);
-        queueManager.tryRouteAsync(request);
+        queueManager.dispatch(request);
 
-        QueueManager.QueueSlot taken = queueManager.takeRequest(false, 0);
+        QueueScheduler.QueueSlot taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
         assertEquals(1L, taken.getRequest().getRequestId());
     }
@@ -85,13 +86,13 @@ class QueueManagerTest {
     @Test
     void takeRequest_shouldSkipCancelledRequests() {
         FlexlbRequest cancelled = createRequest(1L);
-        queueManager.tryRouteAsync(cancelled);
+        queueManager.dispatch(cancelled);
         cancelled.cancel();
 
         FlexlbRequest valid = createRequest(2L);
-        queueManager.tryRouteAsync(valid);
+        queueManager.dispatch(valid);
 
-        QueueManager.QueueSlot taken = queueManager.takeRequest(false, 0);
+        QueueScheduler.QueueSlot taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
         assertEquals(2L, taken.getRequest().getRequestId());
     }
@@ -99,13 +100,13 @@ class QueueManagerTest {
     @Test
     void offerToHead_shouldRequeueAtFront() {
         FlexlbRequest first = createRequest(1L);
-        queueManager.tryRouteAsync(first);
+        queueManager.dispatch(first);
 
         FlexlbRequest retried = createRequest(2L);
-        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(retried, System.currentTimeMillis(), 0L);
+        QueueScheduler.QueueSlot slot = new QueueScheduler.QueueSlot(retried, System.currentTimeMillis(), 0L);
         queueManager.offerToHead(slot);
 
-        QueueManager.QueueSlot taken = queueManager.takeRequest(false, 0);
+        QueueScheduler.QueueSlot taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
         assertEquals(2L, taken.getRequest().getRequestId());
     }
@@ -114,11 +115,11 @@ class QueueManagerTest {
     void offerToHead_shouldCompleteWithErrorWhenQueueFull() {
         // Fill the queue
         for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createRequest(i));
+            queueManager.dispatch(createRequest(i));
         }
 
         FlexlbRequest request = createRequest(99L);
-        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, System.currentTimeMillis(), 99L);
+        QueueScheduler.QueueSlot slot = new QueueScheduler.QueueSlot(request, System.currentTimeMillis(), 99L);
 
         queueManager.offerToHead(slot);
 
@@ -129,26 +130,73 @@ class QueueManagerTest {
     }
 
     @Test
-    void cancelByRequestId_shouldCancelQueuedRequest() {
+    void cancel_shouldCancelQueuedRequest() {
         FlexlbRequest request = createRequest(1L);
-        queueManager.tryRouteAsync(request);
+        queueManager.dispatch(request);
 
-        boolean cancelled = queueManager.cancelByRequestId(1L);
+        boolean cancelled = queueManager.cancel(1L);
         assertTrue(cancelled);
         assertTrue(request.isCancelled());
         assertTrue(request.getFuture().isCompletedExceptionally());
     }
 
     @Test
-    void cancelByRequestId_returnsFalseForUnknownRequest() {
-        boolean cancelled = queueManager.cancelByRequestId(999L);
+    void cancel_returnsFalseForUnknownRequest() {
+        boolean cancelled = queueManager.cancel(999L);
         assertFalse(cancelled);
     }
 
+    // ---- shouldHandle mode dispatch ----
+
+    @Test
+    void shouldHandle_returnsTrueForAutoWhenQueueingEnabled() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setEnableQueueing(true);
+        FlexlbRequest request = createRequest(1L, ScheduleModeEnum.AUTO);
+        assertTrue(queueManager.shouldHandle(request, config));
+    }
+
+    @Test
+    void shouldHandle_returnsFalseForAutoWhenQueueingDisabled() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setEnableQueueing(false);
+        FlexlbRequest request = createRequest(2L, ScheduleModeEnum.AUTO);
+        assertFalse(queueManager.shouldHandle(request, config));
+    }
+
+    @Test
+    void shouldHandle_returnsFalseForDirectEvenWhenQueueingEnabled() {
+        // Bug fix: DIRECT mode must bypass QueueScheduler even if queueing is enabled
+        FlexlbConfig config = new FlexlbConfig();
+        config.setEnableQueueing(true);
+        FlexlbRequest request = createRequest(3L, ScheduleModeEnum.DIRECT);
+        assertFalse(queueManager.shouldHandle(request, config));
+    }
+
+    @Test
+    void shouldHandle_returnsFalseForBatchEvenWhenQueueingEnabled() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setEnableQueueing(true);
+        FlexlbRequest request = createRequest(4L, ScheduleModeEnum.BATCH);
+        assertFalse(queueManager.shouldHandle(request, config));
+    }
+
+    @Test
+    void shouldHandle_returnsFalseWhenConfigIsNull() {
+        FlexlbRequest request = createRequest(5L, ScheduleModeEnum.AUTO);
+        assertFalse(queueManager.shouldHandle(request, null));
+    }
+
     private FlexlbRequest createRequest(long requestId) {
+        return createRequest(requestId, ScheduleModeEnum.AUTO);
+    }
+
+    private FlexlbRequest createRequest(long requestId, ScheduleModeEnum mode) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setGenerateTimeout(60_000);
-        return new FlexlbRequest(request);
+        FlexlbRequest flexlbRequest = new FlexlbRequest(request);
+        flexlbRequest.setScheduleMode(mode);
+        return flexlbRequest;
     }
 }

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import lombok.Getter;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.FlexlbRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshot;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
@@ -10,6 +11,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -34,14 +36,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Request queue manager
+ * Queue scheduler — asynchronous routing with request queueing and retry.
  *
  * @author saichen.sm
  * @since 2025/12/22
  */
 @Getter
 @Component
-public class QueueManager {
+@Order(20)
+public class QueueScheduler extends AbstractScheduler {
 
     private static final String SNAPSHOT_DIR = "/tmp/flexlb-queue-snapshots";
     private static final int MAX_SNAPSHOT_FILES = 10;
@@ -56,20 +59,21 @@ public class QueueManager {
     // Request index for O(1) cancel lookup
     private final ConcurrentHashMap<Long, FlexlbRequest> requestIndex = new ConcurrentHashMap<>();
 
-    public QueueManager(RoutingQueueReporter routingQueueReporter, ConfigService configService) {
+    public QueueScheduler(RoutingQueueReporter routingQueueReporter, ConfigService configService) {
         this.metrics = routingQueueReporter;
         this.queue = new LinkedBlockingDeque<>(configService.loadBalanceConfig().getMaxQueueSize());
     }
 
     /**
-     * Attempt to route request
+     * Dispatch request through the queue channel.
      * <p>
      * Queue and wait asynchronously if resources are insufficient
      *
      * @param request FlexLB request
      * @return Routing result
      */
-    public Mono<Response> tryRouteAsync(FlexlbRequest request) {
+    @Override
+    public Mono<Response> dispatch(FlexlbRequest request) {
         // Add to queue tail
         QueueSlot slot = new QueueSlot(request, System.currentTimeMillis(), sequenceGenerator.incrementAndGet());
         boolean added = queue.offerLast(slot);
@@ -101,7 +105,8 @@ public class QueueManager {
      * @param requestId the request ID to cancel
      * @return true if the request was found and cancelled
      */
-    public boolean cancelByRequestId(long requestId) {
+    @Override
+    public boolean cancel(long requestId) {
         FlexlbRequest req = requestIndex.remove(requestId);
         if (req == null) {
             return false;
@@ -110,6 +115,16 @@ public class QueueManager {
         req.cancel();
         req.getFuture().completeExceptionally(new CancellationException("Request cancelled by client"));
         return true;
+    }
+
+    @Override
+    protected boolean shouldHandleAuto(FlexlbRequest request, FlexlbConfig config) {
+        return config.isEnableQueueing();
+    }
+
+    @Override
+    public int getOrder() {
+        return 20;
     }
 
     /**

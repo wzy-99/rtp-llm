@@ -35,7 +35,7 @@ class RequestSchedulerTest {
     @Mock
     private ConfigService configService;
     @Mock
-    private QueueManager queueManager;
+    private QueueScheduler queueManager;
     @Mock
     private DynamicWorkerManager dynamicWorkerManager;
     @Mock
@@ -55,13 +55,13 @@ class RequestSchedulerTest {
     @Test
     void processRequest_shouldCompleteOnSuccess() throws Exception {
         FlexlbRequest request = createRequest(1L);
-        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
+        QueueScheduler.QueueSlot slot = new QueueScheduler.QueueSlot(request, 0L, 0L);
         Response successResponse = new Response();
         successResponse.setSuccess(true);
         when(router.route(request)).thenReturn(successResponse);
 
         // Use reflection to invoke private processRequest
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueScheduler.QueueSlot.class);
         method.setAccessible(true);
         method.invoke(scheduler, slot);
 
@@ -73,11 +73,11 @@ class RequestSchedulerTest {
     @Test
     void processRequest_shouldRetryOnRetryableError() throws Exception {
         FlexlbRequest request = createRequest(1L);
-        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
+        QueueScheduler.QueueSlot slot = new QueueScheduler.QueueSlot(request, 0L, 0L);
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
         when(router.route(request)).thenReturn(errorResponse);
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueScheduler.QueueSlot.class);
         method.setAccessible(true);
         method.invoke(scheduler, slot);
 
@@ -89,11 +89,11 @@ class RequestSchedulerTest {
     @Test
     void processRequest_shouldNotRetryOnNonRetryableError() throws Exception {
         FlexlbRequest request = createRequest(1L);
-        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
+        QueueScheduler.QueueSlot slot = new QueueScheduler.QueueSlot(request, 0L, 0L);
         Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
         when(router.route(request)).thenReturn(errorResponse);
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueScheduler.QueueSlot.class);
         method.setAccessible(true);
         method.invoke(scheduler, slot);
 
@@ -106,7 +106,7 @@ class RequestSchedulerTest {
     @Test
     void processRequest_shouldStopRetryingAfterMaxRetries() throws Exception {
         FlexlbRequest request = createRequest(1L);
-        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
+        QueueScheduler.QueueSlot slot = new QueueScheduler.QueueSlot(request, 0L, 0L);
         // Simulate already retried 3 times (max)
         for (int i = 0; i < 3; i++) {
             slot.incrementRetryCount();
@@ -115,7 +115,7 @@ class RequestSchedulerTest {
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
         when(router.route(request)).thenReturn(errorResponse);
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueScheduler.QueueSlot.class);
         method.setAccessible(true);
         method.invoke(scheduler, slot);
 
@@ -129,10 +129,10 @@ class RequestSchedulerTest {
     @Test
     void processRequest_shouldCompleteExceptionallyOnException() throws Exception {
         FlexlbRequest request = createRequest(1L);
-        QueueManager.QueueSlot slot = new QueueManager.QueueSlot(request, 0L, 0L);
+        QueueScheduler.QueueSlot slot = new QueueScheduler.QueueSlot(request, 0L, 0L);
         when(router.route(request)).thenThrow(new RuntimeException("routing error"));
 
-        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueManager.QueueSlot.class);
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", QueueScheduler.QueueSlot.class);
         method.setAccessible(true);
         method.invoke(scheduler, slot);
 

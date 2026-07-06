@@ -4,7 +4,9 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.FlexlbRequest;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -14,8 +16,10 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import javax.annotation.PreDestroy;
 import java.util.Map;
@@ -38,7 +42,8 @@ import java.util.concurrent.CompletableFuture;
  * Metrics reporting is handled by {@link BatchMetricsCollector}.
  */
 @Component
-public class BatchScheduler {
+@Order(30)
+public class BatchScheduler extends AbstractScheduler {
 
     private final ConfigService configService;
     private final Router router;
@@ -56,6 +61,37 @@ public class BatchScheduler {
         this.endpointRegistry = endpointRegistry;
         this.store = store;
         this.cleanupCoordinator = cleanupCoordinator;
+    }
+
+    // ==================== AbstractScheduler ====================
+
+    @Override
+    public Mono<Response> dispatch(FlexlbRequest request) {
+        return Mono.fromFuture(submit(request));
+    }
+
+    @Override
+    protected boolean shouldHandleBatch(FlexlbRequest request, FlexlbConfig config) {
+        return true;
+    }
+
+    @Override
+    protected boolean shouldHandleAuto(FlexlbRequest request, FlexlbConfig config) {
+        if (!config.isFlexlbBatchEnabled()) {
+            return false;
+        }
+        Request masterRequest = request.getRequest();
+        return masterRequest != null
+                && masterRequest.getMaxNewTokens() > 1
+                && masterRequest.getNumBeams() <= 1
+                && !masterRequest.isForceDisableSpRun()
+                && request.getGenerateInputPbBytes() != null
+                && request.getGenerateInputPbBytes().length > 0;
+    }
+
+    @Override
+    public int getOrder() {
+        return 30;
     }
 
     // ==================== Request submission ====================

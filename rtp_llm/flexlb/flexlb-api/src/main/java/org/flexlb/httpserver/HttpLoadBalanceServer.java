@@ -1,6 +1,6 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -35,11 +35,11 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 @Component
 public class HttpLoadBalanceServer {
     private final LBStatusConsistencyService lbStatusConsistencyService;
-    private final QueueManager queueManager;
+    private final QueueScheduler queueManager;
     private final ConfigService configService;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
-                                 QueueManager queueManager,
+                                 QueueScheduler queueManager,
                                  ConfigService configService) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.queueManager = queueManager;

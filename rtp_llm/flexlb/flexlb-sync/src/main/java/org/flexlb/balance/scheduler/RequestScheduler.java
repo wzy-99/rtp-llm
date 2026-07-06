@@ -29,7 +29,7 @@ public class RequestScheduler {
 
     private final Router router;
     private final ConfigService configService;
-    private final QueueManager queueManager;
+    private final QueueScheduler queueManager;
     private final DynamicWorkerManager dynamicWorkerManager;
     private final RoutingQueueReporter metrics;
 
@@ -39,7 +39,7 @@ public class RequestScheduler {
 
     public RequestScheduler(Router router,
                             ConfigService configService,
-                            QueueManager queueManager,
+                            QueueScheduler queueManager,
                             DynamicWorkerManager dynamicWorkerManager,
                             RoutingQueueReporter metrics) {
         this.router = router;
@@ -92,7 +92,7 @@ public class RequestScheduler {
 
                 try {
                     // Step 2: Take request from queue
-                    QueueManager.QueueSlot slot = queueManager.takeRequest(true, 500);
+                    QueueScheduler.QueueSlot slot = queueManager.takeRequest(true, 500);
                     if (slot == null) {
                         continue; // permit released in finally
                     }
@@ -111,7 +111,7 @@ public class RequestScheduler {
         Logger.info("Worker thread stopped");
     }
 
-    private void processRequest(QueueManager.QueueSlot slot) {
+    private void processRequest(QueueScheduler.QueueSlot slot) {
         FlexlbRequest request = slot.getRequest();
         try {
             Response response = router.route(request);
@@ -122,7 +122,7 @@ public class RequestScheduler {
         }
     }
 
-    private void handleRoutingResult(QueueManager.QueueSlot slot, Response response) {
+    private void handleRoutingResult(QueueScheduler.QueueSlot slot, Response response) {
         FlexlbRequest request = slot.getRequest();
         FlexlbConfig config = configService.loadBalanceConfig();
         int maxRetry = config.getMaxRetryCount();

@@ -21,7 +21,9 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -32,13 +34,14 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
 @DependsOn({"randomStrategy", "costBasedDecodeStrategy", "costBasedPrefillStrategy"})
-public class DefaultRouter implements Router {
+@Order(10)
+public class DirectScheduler extends AbstractScheduler implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
     private final GroupRoutingPolicy groupRoutingPolicy;
     private final EndpointRegistry endpointRegistry;
 
-    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy,
+    public DirectScheduler(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy,
                          EndpointRegistry endpointRegistry) {
         this.groupRoutingPolicy = groupRoutingPolicy;
         this.endpointRegistry = endpointRegistry;
@@ -50,6 +53,35 @@ public class DefaultRouter implements Router {
             loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
         }
     }
+
+    // ==================== AbstractScheduler ====================
+
+    @Override
+    public Mono<Response> dispatch(FlexlbRequest request) {
+        return Mono.fromCallable(() -> route(request));
+    }
+
+    @Override
+    protected boolean shouldHandleBatch(FlexlbRequest request, FlexlbConfig config) {
+        return true;
+    }
+
+    @Override
+    protected boolean shouldHandleDirect(FlexlbRequest request, FlexlbConfig config) {
+        return true;
+    }
+
+    @Override
+    protected boolean shouldHandleAuto(FlexlbRequest request, FlexlbConfig config) {
+        return true;
+    }
+
+    @Override
+    public int getOrder() {
+        return 10;
+    }
+
+    // ==================== Router interface ====================
 
     /**
      * Routes a request to appropriate worker nodes based on model requirements and role types.
@@ -175,7 +207,7 @@ public class DefaultRouter implements Router {
 
             WorkerEndpoint ep = endpointRegistry.get(serverIpPort);
             if (ep == null) {
-                Logger.warn("DefaultRouter.rollBack: endpoint not found for ipPort={}", serverIpPort);
+                Logger.warn("DirectScheduler.rollBack: endpoint not found for ipPort={}", serverIpPort);
                 continue;
             }
 

@@ -1,49 +1,47 @@
 package org.flexlb.service;
 
-import org.flexlb.balance.scheduler.BatchScheduler;
-import org.flexlb.balance.scheduler.QueueManager;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.flexlb.balance.scheduler.AbstractScheduler;
 import org.springframework.stereotype.Component;
 
 /**
- * Unified cancel entry point for all three routing paths.
+ * Unified cancel entry point for all schedulers.
+ *
+ * <p>Iterates schedulers in descending priority order and delegates cancellation
+ * to the first scheduler that finds the request in-flight.
  *
  * <ol>
- *   <li>Batch path — delegates to {@link BatchScheduler#cancel(long)} which
- *       uses {@link org.flexlb.balance.scheduler.CleanupCoordinator}</li>
- *   <li>Queue path — delegates to {@link QueueManager#cancelByRequestId(long)}</li>
- *   <li>Direct path — no inflight state, nothing to cancel</li>
+ *   <li>BatchScheduler — delegates to {@code BatchScheduler.cancel()}</li>
+ *   <li>QueueScheduler — delegates to {@code QueueScheduler.cancel()}</li>
+ *   <li>DirectScheduler — no inflight state, returns {@code false}</li>
  * </ol>
  */
 @Component
 public class CancelRouter {
 
-    private final BatchScheduler batchScheduler;
-    private final QueueManager queueManager;
+    private final List<AbstractScheduler> schedulers;
 
-    public CancelRouter(@Lazy @Autowired(required = false) BatchScheduler batchScheduler,
-                        QueueManager queueManager) {
-        this.batchScheduler = batchScheduler;
-        this.queueManager = queueManager;
+    public CancelRouter(List<AbstractScheduler> schedulers) {
+        this.schedulers = schedulers.stream()
+                .sorted(Comparator.comparingInt(AbstractScheduler::getOrder).reversed())
+                .collect(Collectors.toList());
     }
 
     /**
-     * Cancel a request by ID across all routing paths.
+     * Cancel a request by ID across all schedulers.
      *
      * @param requestId the request ID to cancel
-     * @return true if the request was found and cancelled in any path
+     * @return true if the request was found and cancelled in any scheduler
      */
     public boolean cancel(long requestId) {
-        // 1. Try Batch path
-        if (batchScheduler != null && batchScheduler.cancel(requestId)) {
-            return true;
+        for (AbstractScheduler scheduler : schedulers) {
+            if (scheduler.cancel(requestId)) {
+                return true;
+            }
         }
-        // 2. Try Queue path
-        if (queueManager != null && queueManager.cancelByRequestId(requestId)) {
-            return true;
-        }
-        // 3. Direct path: no inflight state, nothing to cancel
         return false;
     }
 }

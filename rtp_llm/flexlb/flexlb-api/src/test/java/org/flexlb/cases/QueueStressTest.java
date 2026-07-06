@@ -2,7 +2,7 @@ package org.flexlb.cases;
 
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -56,11 +56,11 @@ public class QueueStressTest {
         return new QueueStressTest(webClient, configService);
     }
 
-    public QueueStressTest resetQueue(QueueManager queueManager, int size) {
+    public QueueStressTest resetQueue(QueueScheduler queueManager, int size) {
         try {
-            Field queueField = QueueManager.class.getDeclaredField("queue");
+            Field queueField = QueueScheduler.class.getDeclaredField("queue");
             queueField.setAccessible(true);
-            BlockingDeque<QueueManager.QueueSlot> newQueue = new LinkedBlockingDeque<>(size);
+            BlockingDeque<QueueScheduler.QueueSlot> newQueue = new LinkedBlockingDeque<>(size);
             queueField.set(queueManager, newQueue);
             log.info("Queue reset to size: {}", size);
             return this;

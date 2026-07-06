@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Shared by Direct, Queue, and Batch routing paths. Path-specific tracking
  * (retry count, enqueue/dequeue time, sequence id) is handled internally by
- * each path's own data structure (e.g. {@code QueueManager.QueueSlot}).
+ * each path's own data structure (e.g. {@code QueueScheduler.QueueSlot}).
  *
  * <p>Config is retained as a transient field set by {@code RouteService} before
  * routing — routing strategies read it via {@link #getConfig()}.

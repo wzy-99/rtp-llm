@@ -39,7 +39,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class DefaultRouterTest {
+class DirectSchedulerTest {
 
     @Mock
     private ConfigService configService;
@@ -71,7 +71,7 @@ class DefaultRouterTest {
     @Mock
     private Request request;
 
-    private DefaultRouter defaultRouter;
+    private DirectScheduler directScheduler;
 
     @BeforeEach
     void setUp() {
@@ -102,7 +102,7 @@ class DefaultRouterTest {
 
         // Create scheduler instance
         lenient().when(groupRoutingPolicy.route(any(FlexlbRequest.class))).thenReturn(GroupRoutingDecision.none());
-        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, endpointRegistry);
+        directScheduler = new DirectScheduler(configService, groupRoutingPolicy, endpointRegistry);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -124,12 +124,12 @@ class DefaultRouterTest {
     // Helper method to mock the static LoadBalanceStrategyFactory
     private void mockStaticLoadBalanceStrategyFactory() {
         try {
-            // Use reflection to set the loadBalancerMap in DefaultRouter
-            Field loadBalancerMapField = DefaultRouter.class.getDeclaredField("loadBalancerMap");
+            // Use reflection to set the loadBalancerMap in DirectScheduler
+            Field loadBalancerMapField = DirectScheduler.class.getDeclaredField("loadBalancerMap");
             loadBalancerMapField.setAccessible(true);
 
             @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(defaultRouter);
+            Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(directScheduler);
 
             // Put mocked LoadBalancer instances into the map
             loadBalancerMap.put(RoleType.PREFILL, prefillLoadBalancer);
@@ -147,7 +147,7 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -159,7 +159,7 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_available_worker_error_when_model_not_in_worker_status_map() {
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -197,7 +197,7 @@ class DefaultRouterTest {
         when(decodeLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -219,7 +219,7 @@ class DefaultRouterTest {
         when(prefillLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -244,7 +244,7 @@ class DefaultRouterTest {
         when(fusionLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -266,7 +266,7 @@ class DefaultRouterTest {
         when(fusionLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -303,7 +303,7 @@ class DefaultRouterTest {
         when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -338,7 +338,7 @@ class DefaultRouterTest {
         when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -352,7 +352,7 @@ class DefaultRouterTest {
         when(flexlbRequest.getRequest()).thenReturn(null);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -372,7 +372,7 @@ class DefaultRouterTest {
         when(decodeLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -410,7 +410,7 @@ class DefaultRouterTest {
                 .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -433,7 +433,7 @@ class DefaultRouterTest {
         when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -455,7 +455,7 @@ class DefaultRouterTest {
         when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
@@ -492,7 +492,7 @@ class DefaultRouterTest {
         when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -541,7 +541,7 @@ class DefaultRouterTest {
         when(vitLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -585,7 +585,7 @@ class DefaultRouterTest {
         when(prefillLoadBalancer.select(any(FlexlbRequest.class), eq(RoleType.PREFILL), eq("long-group"))).thenReturn(prefillServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(flexlbRequest);
+        Response response = directScheduler.route(flexlbRequest);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
