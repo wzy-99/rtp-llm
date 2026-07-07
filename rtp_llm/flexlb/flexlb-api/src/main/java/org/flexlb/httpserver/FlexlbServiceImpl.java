@@ -18,8 +18,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-
 @Component
 public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
@@ -47,132 +45,39 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void schedule(EngineRpcService.FlexlbScheduleRequestPB request,
                          StreamObserver<EngineRpcService.FlexlbScheduleResponsePB> responseObserver) {
-        final ActiveRequestCounter.RequestToken token;
+        ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
         try {
-            token = activeRequestCounter.acquire();
-        } catch (Exception e) {
-            Logger.error("FlexlbService.schedule acquire token failed, request_id={}", request.getRequestId(), e);
-            responseObserver.onNext(buildErrorResponse(e));
-            responseObserver.onCompleted();
-            return;
-        }
-
-        final BalanceContext ctx;
-        try {
-            ctx = buildContext(request);
+            BalanceContext ctx = buildContext(request);
             engineHealthReporter.reportArriveDelayTime(ctx);
+
+            EngineRpcService.FlexlbScheduleResponsePB response;
+            if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
+                response = grpcForwarder.forwardToMaster(request);
+                if (response == null) {
+                    response = routeLocally(ctx);
+                }
+            } else {
+                response = routeLocally(ctx);
+            }
+
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+            ctx.setSuccess(response.getSuccess());
+            if (!response.getSuccess()) {
+                ctx.setErrorMessage(response.getErrorMessage());
+            }
+            engineHealthReporter.reportBalancingService(ctx);
         } catch (Exception e) {
             Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);
-            try {
-                responseObserver.onNext(buildErrorResponse(e));
-                responseObserver.onCompleted();
-            } finally {
-                token.close();
-            }
-            return;
-        }
-
-        // Forward path: keep synchronous for now (tests don't exercise this path)
-        if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
-            boolean asyncHandoff = false;
-            try {
-                EngineRpcService.FlexlbScheduleResponsePB resp = grpcForwarder.forwardToMaster(request);
-                if (resp == null) {
-                    // Forward failed, fall back to async local routing
-                    routeService.route(ctx)
-                            .timeout(Duration.ofSeconds(30))
-                            .doFinally(signal -> token.close())
-                            .subscribe(
-                                    response -> {
-                                        try {
-                                            EngineRpcService.FlexlbScheduleResponsePB pb = toProtoResponse(response);
-                                            ctx.setSuccess(pb.getSuccess());
-                                            if (!pb.getSuccess()) {
-                                                ctx.setErrorMessage(pb.getErrorMessage());
-                                            }
-                                            engineHealthReporter.reportBalancingService(ctx);
-                                            responseObserver.onNext(pb);
-                                            responseObserver.onCompleted();
-                                        } catch (Exception e) {
-                                            Logger.error("FlexlbService.schedule onNext callback error, request_id={}",
-                                                    request.getRequestId(), e);
-                                        }
-                                    },
-                                    error -> {
-                                        try {
-                                            Logger.error("FlexlbService.schedule async route error, request_id={}",
-                                                    request.getRequestId(), error);
-                                            responseObserver.onNext(buildErrorResponse(error));
-                                            responseObserver.onCompleted();
-                                        } catch (Exception e) {
-                                            Logger.error("FlexlbService.schedule onError callback error, request_id={}",
-                                                    request.getRequestId(), e);
-                                        }
-                                    }
-                            );
-                    asyncHandoff = true;
-                    return;
-                }
-                responseObserver.onNext(resp);
-                responseObserver.onCompleted();
-                ctx.setSuccess(resp.getSuccess());
-                if (!resp.getSuccess()) {
-                    ctx.setErrorMessage(resp.getErrorMessage());
-                }
-                engineHealthReporter.reportBalancingService(ctx);
-            } catch (Exception e) {
-                Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);
-                responseObserver.onNext(buildErrorResponse(e));
-                responseObserver.onCompleted();
-            } finally {
-                if (!asyncHandoff) {
-                    token.close();
-                }
-            }
-            return;
-        }
-
-        // Local routing: async callback — gRPC thread returns immediately
-        try {
-            routeService.route(ctx)
-                    .timeout(Duration.ofSeconds(30))
-                    .doFinally(signal -> token.close())
-                    .subscribe(
-                            response -> {
-                                try {
-                                    EngineRpcService.FlexlbScheduleResponsePB pb = toProtoResponse(response);
-                                    ctx.setSuccess(pb.getSuccess());
-                                    if (!pb.getSuccess()) {
-                                        ctx.setErrorMessage(pb.getErrorMessage());
-                                    }
-                                    engineHealthReporter.reportBalancingService(ctx);
-                                    responseObserver.onNext(pb);
-                                    responseObserver.onCompleted();
-                                } catch (Exception e) {
-                                    Logger.error("FlexlbService.schedule onNext callback error, request_id={}",
-                                            request.getRequestId(), e);
-                                }
-                            },
-                            error -> {
-                                try {
-                                    Logger.error("FlexlbService.schedule async route error, request_id={}",
-                                            request.getRequestId(), error);
-                                    responseObserver.onNext(buildErrorResponse(error));
-                                    responseObserver.onCompleted();
-                                } catch (Exception e) {
-                                    Logger.error("FlexlbService.schedule onError callback error, request_id={}",
-                                            request.getRequestId(), e);
-                                }
-                            }
-                    );
-        } catch (Exception e) {
-            Logger.error("FlexlbService.schedule route failed, request_id={}", request.getRequestId(), e);
-            try {
-                responseObserver.onNext(buildErrorResponse(e));
-                responseObserver.onCompleted();
-            } finally {
-                token.close();
-            }
+            EngineRpcService.FlexlbScheduleResponsePB errorResp = EngineRpcService.FlexlbScheduleResponsePB.newBuilder()
+                    .setSuccess(false)
+                    .setCode(500)
+                    .setErrorMessage(e.getMessage() != null ? e.getMessage() : "internal error")
+                    .build();
+            responseObserver.onNext(errorResp);
+            responseObserver.onCompleted();
+        } finally {
+            token.close();
         }
     }
 
@@ -191,12 +96,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    private EngineRpcService.FlexlbScheduleResponsePB buildErrorResponse(Throwable e) {
-        return EngineRpcService.FlexlbScheduleResponsePB.newBuilder()
-                .setSuccess(false)
-                .setCode(500)
-                .setErrorMessage(e.getMessage() != null ? e.getMessage() : "internal error")
-                .build();
+    private EngineRpcService.FlexlbScheduleResponsePB routeLocally(BalanceContext ctx) {
+        Response response = routeService.route(ctx).block();
+        return toProtoResponse(response);
     }
 
     private BalanceContext buildContext(EngineRpcService.FlexlbScheduleRequestPB pb) {

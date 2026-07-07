@@ -6,7 +6,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.env.Environment;
@@ -15,12 +14,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 public class FlexlbGrpcServer {
@@ -39,7 +33,6 @@ public class FlexlbGrpcServer {
     private final Environment environment;
     private Server server;
     private NioEventLoopGroup bossGroup;
-    private ExecutorService grpcExecutor;
 
     public FlexlbGrpcServer(FlexlbServiceImpl flexlbServiceImpl,
                             ConfigService configService,
@@ -64,29 +57,11 @@ public class FlexlbGrpcServer {
         int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
         this.bossGroup = new NioEventLoopGroup(1);
-        FlexlbConfig config = configService.loadBalanceConfig();
-        int corePoolSize = config.getFlexlbGrpcExecutorCoreSize();
-        int maxPoolSize = config.getFlexlbGrpcExecutorMaxSize();
-        this.grpcExecutor = new ThreadPoolExecutor(
-                corePoolSize, maxPoolSize,
-                60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(128),
-                new ThreadFactory() {
-                    final AtomicInteger idx = new AtomicInteger();
-                    @Override
-                    public Thread newThread(Runnable r) {
-                        Thread t = new Thread(r, "flexlb-grpc-" + idx.incrementAndGet());
-                        t.setDaemon(true);
-                        return t;
-                    }
-                }
-        );
 
         server = NettyServerBuilder.forPort(port)
                 .channelType(NioServerSocketChannel.class)
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(workerGroup)
-                .executor(grpcExecutor)
                 .addService(flexlbServiceImpl)
                 .maxInboundMessageSize(16 * 1024 * 1024)
                 .build()
@@ -108,17 +83,6 @@ public class FlexlbGrpcServer {
         }
         if (bossGroup != null) {
             bossGroup.shutdownGracefully();
-        }
-        if (grpcExecutor != null) {
-            grpcExecutor.shutdown();
-            try {
-                if (!grpcExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    grpcExecutor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                grpcExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
         }
     }
 }

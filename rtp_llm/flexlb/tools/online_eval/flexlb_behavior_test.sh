@@ -360,6 +360,25 @@ start_engine() {
   echo ""
 }
 
+# Set performance parameter for a mock engine via /set_perf API
+set_perf() {
+  local engine_name="$1"
+  local perf_key="$2"   # prefill_fixed_ms or decode_scale
+  local perf_val="$3"
+  curl -s -X POST "http://127.0.0.1:${MOCK_HTTP_PORT}/set_perf" \
+    -H "Content-Type: application/json" \
+    -d "{\"engine\": \"${engine_name}\", \"${perf_key}\": ${perf_val}}" \
+    >/dev/null 2>&1
+  log "Set ${engine_name} ${perf_key}=${perf_val}"
+}
+
+# Reset engine performance to defaults (prefill_fixed_ms=100, decode_scale=1.0)
+reset_perf() {
+  local engine_name="$1"
+  set_perf "${engine_name}" "prefill_fixed_ms" 100
+  set_perf "${engine_name}" "decode_scale" 1.0
+}
+
 # Send requests synchronously via load client
 send_requests() {
   local trace="$1"
@@ -404,39 +423,95 @@ scenario_1_ttl_cleanup() {
 
   local p0_port=${MOCK_BASE_GRPC_PORT}
 
-  # Step 1: Send 50 requests to establish baseline
-  log "T=0s: sending 50 baseline requests ..."
-  send_requests "${TRACE_FILE}" 50 20 10000 "${sd}/baseline" "baseline"
-  sleep 2
+  # Step 1: Slow down both prefill engines so requests stay inflight
+  log "T=0s: slowing prefill engines (prefill_fixed_ms=10000) ..."
+  set_perf "prefill-0" "prefill_fixed_ms" 10000
+  set_perf "prefill-1" "prefill_fixed_ms" 10000
 
-  # Step 2: Record prefill-0 inflight count
+  # Step 2: Generate filtered trace with long output (ol 100-500, up to 50 lines)
+  local long_trace="${sd}/long_trace.jsonl"
+  python3 -c "
+import json
+with open('${TRACE_FILE}') as f:
+    count = 0
+    for line in f:
+        req = json.loads(line)
+        if 100 <= req.get('ol', 0) <= 500:
+            print(line, end='')
+            count += 1
+            if count >= 50:
+                break
+" > "${long_trace}" 2>/dev/null || true
+  local trace_lines
+  trace_lines=$(wc -l < "${long_trace}" 2>/dev/null || echo 0)
+  log "  filtered trace: ${trace_lines} lines (ol 100-500)"
+
+  # Step 3: Send requests asynchronously (background, do not wait for completion)
+  log "T=0s: sending ${trace_lines} requests in background ..."
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
+    "${long_trace}" \
+    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
+    --schedule-mode batch \
+    --replay-speed 0 \
+    --max-concurrency 20 \
+    --timeout-ms 30000 \
+    --output-dir "${sd}/load" \
+    >"${sd}/load_client.log" 2>&1 &
+  local load_pid=$!
+
+  # Step 4: Wait for requests to be enqueued (accepted > 0 on prefill-0)
+  log "Waiting for requests to be enqueued on prefill-0 ..."
+  local waited=0
+  while [ ${waited} -lt 15 ]; do
+    local accepted_now
+    accepted_now=$(get_mock_field "prefill-0" "accepted")
+    if [ "${accepted_now}" -gt 0 ] 2>/dev/null; then
+      log "  prefill-0 accepted=${accepted_now} (waited ${waited}s)"
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  # Step 5: Record inflight count (should be > 0 with slow prefill)
   local inflight_before
   inflight_before=$(get_inflight_count "${p0_port}")
-  local accepted_before
-  accepted_before=$(get_mock_field "prefill-0" "accepted")
-  log "T=5s: preflight-0 inflight=${inflight_before} accepted=${accepted_before}"
+  log "T=${waited}s: prefill-0 inflight=${inflight_before} (before kill)"
 
-  # Step 3: Stop prefill-0 engine
-  log "T=5s: stopping prefill-0 ..."
+  # Step 6: Stop prefill-0 engine while requests are still inflight
+  log "T=${waited}s: stopping prefill-0 ..."
   stop_engine "prefill-0"
-  sleep 2
 
-  # Step 4: Poll inflight_status every 5s for 90s
+  # Step 7: Kill load client (stop sending new requests)
+  kill ${load_pid} 2>/dev/null || true
+  wait ${load_pid} 2>/dev/null || true
+
+  # Step 8: Wait 5s for alive=false (let gRPC failure propagate)
+  sleep 5
+
+  # Step 9: Record stuck inflight count
+  local inflight_after_kill
+  inflight_after_kill=$(get_inflight_count "${p0_port}")
+  log "T=$((waited + 5))s: stuck inflight=${inflight_after_kill}"
+
+  # Step 10: Poll inflight count every 5s for 90s (TTL=30s + scheduling margin)
   local timeline_file="${sd}/timeline.jsonl"
   > "${timeline_file}"
   local elapsed=0
   local max_wait=90
   local poll_interval=5
   local cleanup_time="-1"
+  local inflight_final="${inflight_after_kill}"
 
   while [[ ${elapsed} -le ${max_wait} ]]; do
-    local inflight accepted stopped
-    inflight=$(get_inflight_count "${p0_port}")
-    accepted=$(get_mock_field "prefill-0" "accepted")
-    stopped=$(get_mock_field "prefill-0" "stopped")
-    log "  T=${elapsed}s inflight=${inflight} accepted=${accepted} stopped=${stopped}"
-    echo "{\"t\":${elapsed},\"inflight\":${inflight},\"accepted\":${accepted},\"stopped\":\"${stopped}\"}" >> "${timeline_file}"
-    if [[ "${inflight}" == "0" && "${cleanup_time}" == "-1" && ${elapsed} -gt 5 ]]; then
+    local inflight_now accepted_now stopped_now
+    inflight_now=$(get_inflight_count "${p0_port}")
+    accepted_now=$(get_mock_field "prefill-0" "accepted")
+    stopped_now=$(get_mock_field "prefill-0" "stopped")
+    inflight_final="${inflight_now}"
+    log "  T=${elapsed}s inflight=${inflight_now} accepted=${accepted_now} stopped=${stopped_now}"
+    echo "{\"t\":${elapsed},\"inflight\":${inflight_now},\"accepted\":${accepted_now},\"stopped\":\"${stopped_now}\"}" >> "${timeline_file}"
+    if [[ "${inflight_now}" == "0" && "${cleanup_time}" == "-1" ]]; then
       cleanup_time=${elapsed}
       log "  ** inflight reached 0 at T=${elapsed}s"
     fi
@@ -447,12 +522,7 @@ scenario_1_ttl_cleanup() {
     elapsed=$((elapsed + poll_interval))
   done
 
-  # Step 5: Verify
-  local inflight_after_kill
-  inflight_after_kill=$(head -1 "${timeline_file}" | python3 -c "import json,sys; print(json.load(sys.stdin)['inflight'])" 2>/dev/null || echo 0)
-  local inflight_final
-  inflight_final=$(tail -1 "${timeline_file}" | python3 -c "import json,sys; print(json.load(sys.stdin)['inflight'])" 2>/dev/null || echo 0)
-
+  # Step 11: Verify
   local s1_pass="PASS"
   local s1_reasons=""
   if [[ "${inflight_after_kill}" == "0" || "${inflight_after_kill}" == "-1" ]]; then
@@ -462,6 +532,10 @@ scenario_1_ttl_cleanup() {
   if [[ "${inflight_final}" != "0" ]]; then
     s1_pass="FAIL"
     s1_reasons="${s1_reasons}Inflight not cleaned after ${max_wait}s (inflight=${inflight_final}); "
+  fi
+  if [[ "${cleanup_time}" == "-1" ]]; then
+    s1_pass="FAIL"
+    s1_reasons="${s1_reasons}Cleanup never triggered; "
   fi
 
   log "  Result: ${s1_pass}"
@@ -728,46 +802,101 @@ scenario_4_calibrate_recovery() {
 
   local p0_port=${MOCK_BASE_GRPC_PORT}
 
-  # Step 1: Send 50 requests
-  log "T=0s: sending 50 baseline requests ..."
-  send_requests "${TRACE_FILE}" 50 20 10000 "${sd}/baseline" "baseline"
-  sleep 2
+  # Step 1: Slow down both prefill engines so requests stay inflight
+  log "T=0s: slowing prefill engines (prefill_fixed_ms=10000) ..."
+  set_perf "prefill-0" "prefill_fixed_ms" 10000
+  set_perf "prefill-1" "prefill_fixed_ms" 10000
 
-  # Step 2: Record inflight count
+  # Step 2: Generate filtered trace with long output (ol 100-500, up to 50 lines)
+  local long_trace="${sd}/long_trace.jsonl"
+  python3 -c "
+import json
+with open('${TRACE_FILE}') as f:
+    count = 0
+    for line in f:
+        req = json.loads(line)
+        if 100 <= req.get('ol', 0) <= 500:
+            print(line, end='')
+            count += 1
+            if count >= 50:
+                break
+" > "${long_trace}" 2>/dev/null || true
+  local trace_lines
+  trace_lines=$(wc -l < "${long_trace}" 2>/dev/null || echo 0)
+  log "  filtered trace: ${trace_lines} lines (ol 100-500)"
+
+  # Step 3: Send requests asynchronously (background)
+  log "T=0s: sending ${trace_lines} requests in background ..."
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
+    "${long_trace}" \
+    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
+    --schedule-mode batch \
+    --replay-speed 0 \
+    --max-concurrency 20 \
+    --timeout-ms 30000 \
+    --output-dir "${sd}/load" \
+    >"${sd}/load_client.log" 2>&1 &
+  local load_pid=$!
+
+  # Step 4: Wait for requests to be enqueued on prefill-0
+  log "Waiting for requests to be enqueued on prefill-0 ..."
+  local waited=0
+  while [ ${waited} -lt 15 ]; do
+    local accepted_now
+    accepted_now=$(get_mock_field "prefill-0" "accepted")
+    if [ "${accepted_now}" -gt 0 ] 2>/dev/null; then
+      log "  prefill-0 accepted=${accepted_now} (waited ${waited}s)"
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  # Step 5: Record inflight count
   local inflight_before
   inflight_before=$(get_inflight_count "${p0_port}")
-  log "T=5s: prefill-0 inflight=${inflight_before}"
+  log "T=${waited}s: prefill-0 inflight=${inflight_before}"
 
-  # Step 3: Stop prefill-0
-  log "T=5s: stopping prefill-0 ..."
+  # Step 6: Stop prefill-0 engine while requests are still inflight
+  log "T=${waited}s: stopping prefill-0 ..."
   stop_engine "prefill-0"
+
+  # Step 7: Kill load client
+  kill ${load_pid} 2>/dev/null || true
+  wait ${load_pid} 2>/dev/null || true
+
+  # Step 8: Wait 5s for alive=false
   sleep 5
 
-  # Step 4: Record stuck inflight
+  # Step 9: Record stuck inflight
   local inflight_stuck
   inflight_stuck=$(get_inflight_count "${p0_port}")
-  log "T=10s: stuck inflight=${inflight_stuck}"
+  log "T=$((waited + 5))s: stuck inflight=${inflight_stuck}"
 
-  # Step 5: Start prefill-0 (triggers calibrate on next WorkerStatus response)
-  log "T=10s: starting prefill-0 ..."
+  # Step 10: Restart prefill-0 (triggers calibrate on next WorkerStatus)
+  log "T=$((waited + 5))s: starting prefill-0 ..."
   start_engine "prefill-0"
+  # Reset perf to normal so the restarted engine processes at normal speed
+  reset_perf "prefill-0"
 
-  # Step 6: Poll every 2s for 30s
+  # Step 11: Poll every 2s for 30s (calibrate should be much faster than TTL=30s)
   local timeline_file="${sd}/timeline.jsonl"
   > "${timeline_file}"
   local elapsed=0
   local max_wait=30
   local poll_interval=2
   local cleanup_time="-1"
+  local inflight_final="${inflight_stuck}"
 
   while [[ ${elapsed} -le ${max_wait} ]]; do
-    local inflight accepted stopped
-    inflight=$(get_inflight_count "${p0_port}")
-    accepted=$(get_mock_field "prefill-0" "accepted")
-    stopped=$(get_mock_field "prefill-0" "stopped")
-    log "  T=${elapsed}s inflight=${inflight} accepted=${accepted} stopped=${stopped}"
-    echo "{\"t\":${elapsed},\"inflight\":${inflight},\"accepted\":${accepted},\"stopped\":\"${stopped}\"}" >> "${timeline_file}"
-    if [[ "${inflight}" == "0" && "${cleanup_time}" == "-1" && ${elapsed} -gt 0 ]]; then
+    local inflight_now accepted_now stopped_now
+    inflight_now=$(get_inflight_count "${p0_port}")
+    accepted_now=$(get_mock_field "prefill-0" "accepted")
+    stopped_now=$(get_mock_field "prefill-0" "stopped")
+    inflight_final="${inflight_now}"
+    log "  T=${elapsed}s inflight=${inflight_now} accepted=${accepted_now} stopped=${stopped_now}"
+    echo "{\"t\":${elapsed},\"inflight\":${inflight_now},\"accepted\":${accepted_now},\"stopped\":\"${stopped_now}\"}" >> "${timeline_file}"
+    if [[ "${inflight_now}" == "0" && "${cleanup_time}" == "-1" && ${elapsed} -gt 0 ]]; then
       cleanup_time=${elapsed}
       log "  ** inflight reached 0 at T=${elapsed}s (calibrate cleanup)"
     fi
@@ -778,7 +907,7 @@ scenario_4_calibrate_recovery() {
     elapsed=$((elapsed + poll_interval))
   done
 
-  # Verify
+  # Step 12: Verify
   local s4_pass="PASS"
   local s4_reasons=""
   if [[ "${inflight_stuck}" == "0" || "${inflight_stuck}" == "-1" ]]; then
@@ -787,7 +916,7 @@ scenario_4_calibrate_recovery() {
   fi
   if [[ "${cleanup_time}" == "-1" ]]; then
     s4_pass="FAIL"
-    s4_reasons="${s4_reasons}Inflight never reached 0 within ${max_wait}s; "
+    s4_reasons="${s4_reasons}Inflight never reached 0 within ${max_wait}s (final=${inflight_final}); "
   fi
   # Compare with TTL: calibrate should be much faster than TTL=30s
   if [[ "${cleanup_time}" != "-1" ]] && [[ ${cleanup_time} -ge 30 ]]; then
