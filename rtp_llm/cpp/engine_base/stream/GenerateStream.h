@@ -235,7 +235,6 @@ public:
 
     int64_t getTimeoutMs() const;
     void    checkTimeout();
-    void    checkTimeoutWithoutLock();
 
     void reportEvent(StreamEvents::EventType event,
                      ErrorCode               error_code = ErrorCode::NONE_ERROR,
@@ -254,13 +253,7 @@ public:
     size_t reserveStep() const {
         return reserve_step_;
     }
-    // Lifecycle methods — replace moveToNext().
-    bool prepare();
-    bool isReady();
-    void activate();
-    void advance();
-    bool alive();
-    void finish();
+    StreamState moveToNext();
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
@@ -452,7 +445,6 @@ public:
     bool isGroup() const {
         return generate_input_->group_id != -1;
     }
-
     int64_t groupId() const {
         return generate_input_->group_id;
     }
@@ -462,14 +454,7 @@ public:
     }
 
     /// Log-friendly stream id: numeric ``streamId()`` (``request_id`` / ``inter_request_id``) + ``trace_id`` string.
-    std::string streamLogTag() const {
-        char buf[256];
-        std::string tid = traceId();
-        snprintf(buf, sizeof(buf), "trace_id=%s req_id=%ld",
-                 tid.empty() ? "-" : tid.c_str(),
-                 streamId());
-        return std::string(buf);
-    }
+    std::string streamLogTag() const;
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
@@ -699,7 +684,6 @@ protected:
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
-    void finish_internal();
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
@@ -765,7 +749,6 @@ protected:
     size_t                             propose_step_         = 0;
     size_t                             score_len_            = 0;
     size_t                             reserve_step_         = 0;
-    bool                               needs_cache_loading_  = false;
     bool                               acceped_bouns_token_  = false;
     int                                sp_edit_search_index_ = 0;
     bool                               sp_edit_first_time_   = true;

@@ -143,11 +143,10 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     // Prepare KV cache allocation, then wait until the stream is ready.
     // This busy-wait is safe because the stream has not been enqueued to the
     // scheduler yet -- the gRPC thread exclusively drives the state machine.
-    generate_stream->prepare();
-    while (generate_stream->alive() && !generate_stream->isReady()) {
+    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
-    if (!generate_stream->alive() || generate_stream->hasError()) {
+    if (generate_stream->hasError()) {
         auto   stream_error = generate_stream->statusInfo();
         string error_msg    = stream_error.ToString();
         if (error_msg.empty()) {
