@@ -18,6 +18,10 @@ MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 MOCK_ENGINE_IMPL="${MOCK_ENGINE_IMPL:-java}"
 JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
+JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-32g}"
+JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+ENDPOINT_READY_TIMEOUT_S="${ENDPOINT_READY_TIMEOUT_S:-120}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
 N_SHARDS="${N_SHARDS:-64}"  # mock engine 分片数，默认 64（多进程模式）
@@ -255,7 +259,10 @@ if [[ "${START_MOCK}" == "1" ]]; then
       echo "Build it with: ./mvnw package -DskipTests -P '!internal'" >&2
       exit 1
     fi
-    java -Xms1g -Xmx1g -jar "${JAVA_MOCK_ENGINE_JAR}" \
+    java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
+      -XX:+ExitOnOutOfMemoryError \
+      -Xlog:gc*,safepoint:"${RUN_DIR}/mock_engine_gc.log":time,uptime,level,tags:filecount=3,filesize=20m \
+      -jar "${JAVA_MOCK_ENGINE_JAR}" \
       --n-prefill "${N_PREFILL}" \
       --n-decode "${N_DECODE}" \
       --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
@@ -268,6 +275,7 @@ if [[ "${START_MOCK}" == "1" ]]; then
       --env-file "${FLEXLB_ENV_FILE}" \
       >"${RUN_DIR}/mock_engine.log" 2>&1 &
     MOCK_PID="$!"
+    echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
     # The Java process writes discovery files only after every gRPC port is bound.
     wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
     if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
