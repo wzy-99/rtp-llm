@@ -31,7 +31,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATC
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
-import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
+import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 
 /**
@@ -42,7 +42,7 @@ import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
  * queue wait time (app.flexlb.batcher.queue.wait.time.ms, split from routing.queue.wait.time.ms),
  * dispatch reason (engine.balancing.master.dispatch.reason),
  * inflight (flexlb.scheduler.inflight.size + health.check.running.task.info.size).
- * Note: routing.queue.length still shares the name with the non-batch path (P2 cleanup pending).
+ * Note: routing.queue.length is now exclusively used by RoutingQueueReporter (non-batch path).
  */
 @Slf4j
 @Component
@@ -61,8 +61,6 @@ public class BatchSchedulerReporter {
 
     @PostConstruct
     public void init() {
-        // Queue length — still shares name with RoutingQueueReporter (both GAUGE); P2 cleanup pending.
-        monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         // Batcher queue wait time — independent name to avoid type conflict with the direct-path
         // routing queue wait metric (GAUGE + empty tags). Batch path uses TIMER + per-engine tags.
         monitor.register(BATCHER_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -92,6 +90,9 @@ public class BatchSchedulerReporter {
         monitor.register(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
+        // Inflight TTL expired — count of inflight requests cleaned up by the TTL task, QPS tagged by role
+        monitor.register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -112,20 +113,9 @@ public class BatchSchedulerReporter {
     // ==================== Queue metrics ====================
 
     /**
-     * Report per-worker batcher queue depth via {@code routing.queue.length}.
-     */
-    public void reportBatcherQueueDepth(String role, String engineIp, String engineIpPort, int depth) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
-                "type", "batchQueue",
-                "role", role);
-        monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
-    }
-
-    /**
      * Report per-worker batcher queue size via {@code app.flexlb.batcher.queue.size}.
-     * <p>Independent metric name to avoid tag schema conflict with {@code routing.queue.length}
-     * (which uses type=batchQueue tag). Uses the same role + engineIp tag pattern as other
-     * per-worker metrics.
+     * <p>Tagged by role and engineIp. Uses an independent metric name from
+     * {@code routing.queue.length} (owned by RoutingQueueReporter) to avoid tag schema conflict.
      */
     public void reportBatcherQueueSize(String role, String engineIp, String engineIpPort, int depth) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
@@ -247,6 +237,19 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
                 "role", role);
         monitor.report(INFLIGHT_MAX_AGE_MS, tags, ageMs);
+    }
+
+    /**
+     * Report the count of inflight requests expired and cleaned up by the TTL task
+     * via {@code app.flexlb.inflight.ttl.expired.qps}.
+     * <p>Scheduler-level metric tagged by role only (no engineIp), because the TTL
+     * cleanup is a scheduler-wide operation not tied to a specific engine.
+     *
+     * @param count number of inflight entries expired in this cleanup cycle
+     */
+    public void reportInflightTtlExpired(int count) {
+        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+        monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
     }
 
     // ==================== Decode inflight metrics ====================

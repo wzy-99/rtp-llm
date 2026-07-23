@@ -367,6 +367,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     public void cleanupInflight() {
         long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
         long now = System.currentTimeMillis();
+        int expiredCount = 0;
         for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
             InflightEntry entry = candidate.getValue();
             if (now - entry.createdAtMs() <= ttlMs) {
@@ -377,7 +378,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     continue;
                 }
                 timeoutEntry(entry, "inflight TTL expired");
+                expiredCount++;
             }
+        }
+        if (expiredCount > 0) {
+            reporter.reportInflightTtlExpired(expiredCount);
         }
         long cutoff = System.currentTimeMillis() - ttlMs;
         terminalStates.entrySet().removeIf(entry -> entry.getValue().updatedAtMs() < cutoff);

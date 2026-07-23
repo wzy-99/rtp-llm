@@ -99,6 +99,12 @@ public class MetricConstant {
             "app.flexlb.inflight.max.age.ms";
 
     /**
+     * FlexLB scheduler inflight TTL expired count — number of inflight requests
+     * cleaned up by the TTL cleanup task. Reported as QPS, tagged by role.
+     */
+    public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";
@@ -152,7 +158,7 @@ public class MetricConstant {
      * in the per-engine WorkerBatcher queue.
      * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
      * Independent metric name to avoid tag schema conflict with {@link #ROUTING_QUEUE_LENGTH}
-     * (which uses type=batchQueue tag for backward compatibility).
+     * (which is now exclusively owned by RoutingQueueReporter with type=mainQueue tag).
      */
     public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
 
