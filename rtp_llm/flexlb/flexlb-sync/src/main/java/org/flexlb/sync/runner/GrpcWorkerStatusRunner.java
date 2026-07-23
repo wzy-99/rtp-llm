@@ -177,7 +177,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             // 3. Notify scheduler (cleanup finished requests)
             if (batchScheduler != null) {
-                batchScheduler.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
+                batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
             }
 
             Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();

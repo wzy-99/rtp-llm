@@ -189,7 +189,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
 
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
-                    prefillEp, decodeEp, /* sortKey set by batcher */ 0, System.currentTimeMillis(),
+                    prefillEp, decodeEp, System.currentTimeMillis(),
                     absoluteDeadlineMs);
             InflightEntry entry = new InflightEntry(item);
             InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
@@ -303,7 +303,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Completion from worker status ====================
 
-    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse response) {
+    public void onWorkerStatusUpdate(WorkerStatusResponse response) {
         if (response == null) {
             return;
         }
