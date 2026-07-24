@@ -203,6 +203,14 @@ class MockEngineState:
         )
         if self.inject_config.get("enqueue_error"):
             return self.pb2.EnqueueBatchResponsePB(batch_id=batch_id)
+        # no_respond: ACK the batch but skip all prefill processing so the
+        # request truly hangs (no task finished, no cache admit, no outputs).
+        if self.inject_config.get("no_respond"):
+            response = self.pb2.EnqueueBatchResponsePB(batch_id=batch_id)
+            for slot in request.dp_slots:
+                for item in slot.requests:
+                    response.successes.add(request_id=int(item.input.request_id))
+            return response
         inputs = []
         for slot in request.dp_slots:
             for item in slot.requests:
@@ -235,6 +243,10 @@ class MockEngineState:
             import grpc
 
             raise grpc.RpcError("injected enqueue_error")
+        # no_respond: hang indefinitely without any prefill/decode processing.
+        if self.inject_config.get("no_respond"):
+            await asyncio.sleep(300)
+            return
         request_id = int(input_pb.request_id)
         queue = self._response_queues.setdefault(request_id, asyncio.Queue())
         if self.role == "decode":
@@ -250,6 +262,11 @@ class MockEngineState:
             "FetchResponse arrived engine=%s rid=%d", self.name, int(request_id)
         )
         self._response_queues.setdefault(int(request_id), asyncio.Queue())
+        if self.inject_config.get("no_respond"):
+            # Hang indefinitely — no response will ever be produced.
+            # The caller's timeout will cancel this stream.
+            await asyncio.sleep(300)
+            return
         if self.inject_config.get("fetch_error"):
             import grpc
 
@@ -1067,6 +1084,12 @@ class MockEngineCluster:
                 addr = f"{role_addr.ip}:{role_addr.grpc_port}"
                 state = self._by_grpc_addr.get(addr)
                 if state is not None:
+                    if state.name in self._stopped:
+                        logger.debug(
+                            f"[DIAG] resolve_decode: rid={request_id} decode_addr={addr} "
+                            f"engine={state.name} is_stopped=True, skipping"
+                        )
+                        continue
                     logger.debug(
                         f"[DIAG] resolve_decode: rid={request_id} decode_addr={addr} "
                         f"found_in_process=True engine={state.name}"
@@ -1077,7 +1100,9 @@ class MockEngineCluster:
                     f"found_in_process=False, returning None for remote routing"
                 )
                 return None
-        decodes = [s for s in self.states if s.role == "decode"]
+        decodes = [
+            s for s in self.states if s.role == "decode" and s.name not in self._stopped
+        ]
         if not decodes:
             logger.debug(
                 f"[DIAG] resolve_decode: rid={request_id} no decode engines available, returning None"
