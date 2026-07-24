@@ -382,7 +382,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
         }
         if (expiredCount > 0) {
-            reporter.reportInflightTtlExpired(expiredCount);
+            reporter.reportInflightTtlExpired("SCHEDULER", expiredCount);
         }
         long cutoff = System.currentTimeMillis() - ttlMs;
         terminalStates.entrySet().removeIf(entry -> entry.getValue().updatedAtMs() < cutoff);
@@ -875,6 +875,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
+        reporter.reportInflightMaxAgeMs("SCHEDULER", "scheduler", "scheduler",
+                InflightEvictor.maxAgeMs(inflight, System.currentTimeMillis()));
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
@@ -894,7 +896,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Inflight entry ====================
 
-    static final class InflightEntry {
+    static final class InflightEntry implements InflightEvictor.TtlTracked {
         final BatchItem item;
         final RequestLifecycle lifecycle;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);

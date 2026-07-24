@@ -77,7 +77,7 @@ public class BatchSchedulerReporter {
         // Inflight — batch count and request count per worker (FlexLB scheduler view, tagged by role)
         monitor.register(INFLIGHT_BATCH_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(INFLIGHT_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        // Scheduler-level inflight size — uses scheduler-level tags (role=PREFILL, engineIp="scheduler")
+        // Scheduler-level inflight size — uses scheduler-level tags (role=SCHEDULER, engineIp="scheduler")
         // Note: the former per-engine app.engine.health.check.local.inflight.size has been removed.
         monitor.register(SCHEDULER_INFLIGHT_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
@@ -192,15 +192,15 @@ public class BatchSchedulerReporter {
     /**
      * Report scheduler inflight size via {@code flexlb.scheduler.inflight.size}.
      * <p>Uses an independent metric name (not {@code engine.health.check.local.inflight.size})
-     * because this is a scheduler-level metric with tag schema (role=PREFILL, engineIp="scheduler"),
+     * because this is a scheduler-level metric with tag schema (role=SCHEDULER, engineIp="scheduler"),
      * which differs from EngineHealthReporter's per-engine version tagged by
      * (model, code, engineIp=real-engine-IP, role). Sharing the same metric name would cause
      * tag schema conflicts in kmonitor grouping.
-     * Uses role=PREFILL + engineIp=scheduler tags to match the Grafana panel filter.
+     * Uses role=SCHEDULER + engineIp=scheduler tags to match the Grafana panel filter.
      */
     public void reportSchedulerInflightSize(int size) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
+                "role", "SCHEDULER",
                 "engineIp", "scheduler",
                 "engineIpPort", "scheduler");
         monitor.report(SCHEDULER_INFLIGHT_SIZE, tags, size);
@@ -242,13 +242,15 @@ public class BatchSchedulerReporter {
     /**
      * Report the count of inflight requests expired and cleaned up by the TTL task
      * via {@code app.flexlb.inflight.ttl.expired.qps}.
-     * <p>Scheduler-level metric tagged by role only (no engineIp), because the TTL
-     * cleanup is a scheduler-wide operation not tied to a specific engine.
+     * <p>Tagged by role only (no engineIp), because the TTL cleanup is not tied
+     * to a specific engine. The scheduler passes "SCHEDULER", PrefillEndpoint
+     * passes "PREFILL", and DecodeEndpoint passes "DECODE".
      *
+     * @param role  the component role tag (SCHEDULER / PREFILL / DECODE)
      * @param count number of inflight entries expired in this cleanup cycle
      */
-    public void reportInflightTtlExpired(int count) {
-        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+    public void reportInflightTtlExpired(String role, int count) {
+        FlexMetricTags tags = FlexMetricTags.of("role", role);
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
     }
 

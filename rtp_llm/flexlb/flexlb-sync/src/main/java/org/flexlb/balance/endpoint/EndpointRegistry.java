@@ -243,26 +243,33 @@ public class EndpointRegistry {
     }
 
     /**
-     * Trigger TTL eviction on all prefill and decode endpoints.
-     *
-     * @param ttlMs max age before eviction
-     */
-    private void evictExpiredAll(long ttlMs) {
-        prefillEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
-        decodeEndpoints.values().forEach(ep -> ep.evictExpiredRequests(ttlMs));
-        pdFusionEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
-    }
-
-    /**
      * Periodic TTL eviction for all endpoints.
      * <p>Each endpoint is responsible for its own inflight lifecycle.
      * This scheduled method provides a safety-net fallback for entries
      * that were not cleaned up by {@code calibrate()} (e.g., engine crash,
      * network partition, status report delay).
+     * <p>Aggregates eviction counts by role and reports them via
+     * {@code app.flexlb.inflight.ttl.expired.qps} tagged with PREFILL / DECODE.
      */
     @Scheduled(fixedRate = 60000L)
     public void scheduledEviction() {
         long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
-        evictExpiredAll(ttlMs);
+        int prefillExpired = 0;
+        for (PrefillEndpoint ep : prefillEndpoints.values()) {
+            prefillExpired += ep.evictExpiredBatches(ttlMs);
+        }
+        for (PrefillEndpoint ep : pdFusionEndpoints.values()) {
+            prefillExpired += ep.evictExpiredBatches(ttlMs);
+        }
+        int decodeExpired = 0;
+        for (DecodeEndpoint ep : decodeEndpoints.values()) {
+            decodeExpired += ep.evictExpiredRequests(ttlMs);
+        }
+        if (prefillExpired > 0) {
+            reporter.reportInflightTtlExpired(RoleType.PREFILL.name(), prefillExpired);
+        }
+        if (decodeExpired > 0) {
+            reporter.reportInflightTtlExpired(RoleType.DECODE.name(), decodeExpired);
+        }
     }
 }
