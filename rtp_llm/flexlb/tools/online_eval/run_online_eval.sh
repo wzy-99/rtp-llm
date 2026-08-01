@@ -85,9 +85,19 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
     PYTHON_BIN="$(command -v python3 || true)"
   fi
 fi
-if [[ -z "${PYTHON_BIN}" ]] \
-    || ! "${PYTHON_BIN}" -c 'import aiohttp, grpc' >/dev/null 2>&1; then
-  echo "Python with aiohttp and grpc is required; set PYTHON_BIN to the eval venv" >&2
+# Python with aiohttp+grpc is only needed for Python load client or Python monitor
+if [[ "${LOAD_CLIENT_IMPL}" == "python" || "${MONITOR_IMPL}" == "python" ]]; then
+  if [[ -z "${PYTHON_BIN}" ]] \
+      || ! "${PYTHON_BIN}" -c 'import aiohttp, grpc' >/dev/null 2>&1; then
+    echo "Python with aiohttp and grpc is required when LOAD_CLIENT_IMPL=python or MONITOR_IMPL=python; set PYTHON_BIN to the eval venv" >&2
+    exit 1
+  fi
+fi
+
+# Basic python3 is still needed for helper functions (aggregate_shard_results, wait_for_port, etc.)
+# but only requires standard library — no aiohttp/grpc needed
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for helper functions" >&2
   exit 1
 fi
 
