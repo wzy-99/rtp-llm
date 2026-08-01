@@ -71,7 +71,7 @@ final class MockPerformanceModel {
             }
         }
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
-        double jitterPct = performance.path("jitter_pct").asDouble(0.05);
+        double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
                 formula, List.copyOf(points), decode.path("scale").asDouble(1.0),

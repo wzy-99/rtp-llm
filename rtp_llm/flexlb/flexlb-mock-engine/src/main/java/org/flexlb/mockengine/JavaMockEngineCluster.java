@@ -21,6 +21,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
@@ -119,9 +120,19 @@ public final class JavaMockEngineCluster {
         },
                 30, 30, TimeUnit.SECONDS);
 
+        scheduler.scheduleAtFixedRate(() -> {
+            for (FastRpcService service : services.values()) {
+                service.periodicCleanup();
+            }
+        },
+                60, 60, TimeUnit.SECONDS);
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             controlServer.stop();
             scheduler.shutdownNow();
+            for (FastRpcService service : services.values()) {
+                service.shutdown();
+            }
             shutdown(serversByPort, bossGroup, workerGroup);
         }, "java-mock-engine-shutdown"));
 
@@ -291,6 +302,7 @@ public final class JavaMockEngineCluster {
         private final AtomicLong acceptedCount = new AtomicLong();
         private final AtomicLong completedCount = new AtomicLong();
         private final AtomicLong cancelledCount = new AtomicLong();
+        private final ExecutorService responseExecutor;
 
         FastRpcService(String roleName,
                        EngineRpcService.RoleTypePB roleType,
@@ -307,6 +319,11 @@ public final class JavaMockEngineCluster {
             this.scheduler = scheduler;
             this.performance = performance;
             this.cache = new MockLruBlockCache(cacheCapacity);
+            this.responseExecutor = Executors.newCachedThreadPool(r -> {
+                Thread thread = new Thread(r, "mock-response-poller-" + grpcPort);
+                thread.setDaemon(true);
+                return thread;
+            });
             this.stats = stats;
         }
 
@@ -463,7 +480,9 @@ public final class JavaMockEngineCluster {
                 schedulePrefillCompletion(List.of(shape), -1, 0);
             }
 
-            scheduler.execute(() -> {
+            // Use a separate executor for blocking poll to avoid starving the
+            // completion scheduler which is responsible for producing responses.
+            responseExecutor.execute(() -> {
                 try {
                     EngineRpcService.GenerateOutputsPB output = queue.poll(60, TimeUnit.SECONDS);
                     if (output != null) {
@@ -497,7 +516,9 @@ public final class JavaMockEngineCluster {
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
 
-            scheduler.execute(() -> {
+            // Use a separate executor for blocking poll to avoid starving the
+            // completion scheduler which is responsible for producing responses.
+            responseExecutor.execute(() -> {
                 try {
                     EngineRpcService.GenerateOutputsPB output = queue.poll(60, TimeUnit.SECONDS);
                     if (output != null) {
@@ -538,6 +559,9 @@ public final class JavaMockEngineCluster {
                                 .setErrorMessage("cancelled by client")
                                 .build())
                         .build());
+                // The poller already holds a reference to the queue, so it is safe
+                // to remove it from the map after offering the cancel response.
+                responseQueues.remove(requestId);
             }
         }
 
@@ -583,19 +607,26 @@ public final class JavaMockEngineCluster {
             long delayNanos = Math.max(0, finishNanos - now);
             scheduler.schedule(() -> {
                 for (MockPerformanceModel.RequestShape shape : shapes) {
-                    runningTasks.remove(shape.input().getRequestId());
+                    long requestId = shape.input().getRequestId();
+                    runningTasks.remove(requestId);
                     recordCompletion(shape, batchId, executionMs, dpRank);
                     boolean decodeStarted = startDecode(shape, batchId);
                     if (!decodeStarted) {
-                        completedCount.incrementAndGet();
-                        requestStates.put(shape.input().getRequestId(), "completed");
+                        boolean alreadyCancelled = cancelledRequests.contains(requestId);
+                        if (!alreadyCancelled) {
+                            completedCount.incrementAndGet();
+                            requestStates.put(requestId, "completed");
+                        }
                         if (!faultConfig.isNoRespond()) {
                             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                                    responseQueues.get(shape.input().getRequestId());
-                            if (queue != null && !cancelledRequests.contains(shape.input().getRequestId())) {
+                                    responseQueues.get(requestId);
+                            if (queue != null && !alreadyCancelled) {
                                 queue.offer(buildOutput(shape, true));
                             }
                         }
+                        // Clean up per-request state to prevent unbounded map growth
+                        responseQueues.remove(requestId);
+                        cancelledRequests.remove(requestId);
                     }
                     if (performance.shouldAdmitCache() && cache.admit(shape.blockKeys())) {
                         cacheVersion.incrementAndGet();
@@ -643,18 +674,25 @@ public final class JavaMockEngineCluster {
                     task(shape, batchId, 0, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
             long executionMs = performance.decodeMs(shape.outputLen(), activeBatch);
             scheduler.schedule(() -> {
-                runningTasks.remove(shape.input().getRequestId());
+                long requestId = shape.input().getRequestId();
+                runningTasks.remove(requestId);
                 activeDecodeRequests.decrementAndGet();
                 activeKvTokens.addAndGet(-shape.inputLen());
                 pendingRequests.decrementAndGet();
                 recordCompletion(shape, batchId, executionMs, 0);
-                completedCount.incrementAndGet();
-                requestStates.put(shape.input().getRequestId(), "completed");
+                boolean alreadyCancelled = cancelledRequests.contains(requestId);
+                if (!alreadyCancelled) {
+                    completedCount.incrementAndGet();
+                    requestStates.put(requestId, "completed");
+                }
                 if (responseQueue != null
-                        && !cancelledRequests.contains(shape.input().getRequestId())
+                        && !alreadyCancelled
                         && !faultConfig.isNoRespond()) {
                     responseQueue.offer(buildOutput(shape, true));
                 }
+                // Clean up per-request state to prevent unbounded map growth
+                responseQueues.remove(requestId);
+                cancelledRequests.remove(requestId);
                 if (performance.shouldAdmitCache() && cache.admit(shape.blockKeys())) {
                     cacheVersion.incrementAndGet();
                 }
@@ -752,6 +790,25 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        /**
+         * Remove orphaned entries from responseQueues, requestStates, and cancelledRequests
+         * for requestIds that are no longer in runningTasks. This is a safety net for
+         * entries that were not cleaned up by the completion or cancel callbacks.
+         */
+        void periodicCleanup() {
+            Set<Long> activeIds = runningTasks.keySet();
+            responseQueues.keySet().retainAll(activeIds);
+            requestStates.keySet().retainAll(activeIds);
+            cancelledRequests.retainAll(activeIds);
+        }
+
+        /**
+         * Shut down the dedicated response-polling executor.
+         */
+        void shutdown() {
+            responseExecutor.shutdownNow();
+        }
+
         // ──────────── Getters and setters for MockControlServer ────────────
 
         FaultInjectionConfig getFaultConfig() { return faultConfig; }
@@ -771,7 +828,11 @@ public final class JavaMockEngineCluster {
         Map<Long, String> getRequestStates() { return requestStates; }
 
         int getInflightCount() {
-            return pendingRequests.get() + activeDecodeRequests.get();
+            // pendingRequests already counts both prefill and decode requests
+            // (incremented in schedulePrefillCompletion and scheduleDecodeCompletion).
+            // activeDecodeRequests is a subset for decode-specific reporting only;
+            // adding it would double-count decode requests.
+            return pendingRequests.get();
         }
 
         Map<String, Object> getSnapshot() {

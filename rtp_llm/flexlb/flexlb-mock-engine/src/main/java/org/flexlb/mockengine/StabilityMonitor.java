@@ -233,7 +233,14 @@ public final class StabilityMonitor {
         }
         try {
             JsonNode root = OBJECT_MAPPER.readTree(body);
-            JsonNode enginesNode = root.path("engines");
+            // MockControlServer returns a JSON array directly as the root element.
+            // For backward compatibility, also handle {"engines":[...]} wrapper.
+            JsonNode enginesNode;
+            if (root.isArray()) {
+                enginesNode = root;
+            } else {
+                enginesNode = root.path("engines");
+            }
             if (!enginesNode.isArray()) {
                 return null;
             }

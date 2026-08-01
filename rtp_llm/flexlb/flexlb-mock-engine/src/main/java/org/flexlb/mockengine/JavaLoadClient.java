@@ -225,7 +225,22 @@ public final class JavaLoadClient {
             }
             loopIdx++;
             if (futures.size() >= 100_000) {
-                futures.removeIf(Future::isDone);
+                // Collect results from completed futures before removing them
+                // to avoid losing latency/error statistics in loop mode.
+                futures.removeIf(future -> {
+                    if (future.isDone()) {
+                        try {
+                            RequestResult collected = future.get();
+                            if (collected != null) {
+                                results.add(collected);
+                            }
+                        } catch (Exception ignored) {
+                            // Result could not be retrieved; will not be counted.
+                        }
+                        return true;
+                    }
+                    return false;
+                });
             }
             System.out.println("loop replay: iteration " + loopIdx + " starting, sent " + sentCount
                     + " requests, elapsed " + (System.nanoTime() - replayStartedNanos) / 1_000_000_000L + "s");
@@ -254,13 +269,28 @@ public final class JavaLoadClient {
             long remaining = deadlineNanos - System.nanoTime();
             if (remaining <= 0) {
                 futures.get(i).cancel(true);
+                // Count timed-out requests as errors so they are reflected in error_count
+                RequestResult timeoutResult = new RequestResult();
+                timeoutResult.status = "timeout";
+                timeoutResult.error = "response deadline exceeded";
+                results.add(timeoutResult);
                 continue;
             }
             try {
                 RequestResult result = futures.get(i).get(remaining, TimeUnit.NANOSECONDS);
                 results.add(result);
+            } catch (java.util.concurrent.TimeoutException e) {
+                futures.get(i).cancel(true);
+                RequestResult timeoutResult = new RequestResult();
+                timeoutResult.status = "timeout";
+                timeoutResult.error = "response timeout";
+                results.add(timeoutResult);
             } catch (Exception e) {
                 futures.get(i).cancel(true);
+                RequestResult errorResult = new RequestResult();
+                errorResult.status = "exception";
+                errorResult.error = e.toString();
+                results.add(errorResult);
             }
         }
         progressMonitor.shutdownNow();
@@ -402,12 +432,18 @@ public final class JavaLoadClient {
                     }
                 }
 
-                long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
-                if (firstFrameNanos != null) {
+                if (firstFrameNanos == null) {
+                    // Stream completed with zero outputs — mark as error to avoid
+                    // masking underlying engine issues as successful requests.
+                    result.status = "empty_response";
+                    result.error = "stream completed with zero outputs";
+                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                } else {
+                    long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
                     result.ttftMs = (firstFrameNanos - startedNanos) / 1_000_000.0;
+                    result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
+                    result.status = "ok";
                 }
-                result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
-                result.status = "ok";
                 result.wallClockTs = System.currentTimeMillis() / 1000.0;
             } catch (Exception e) {
                 result.status = "exception";
