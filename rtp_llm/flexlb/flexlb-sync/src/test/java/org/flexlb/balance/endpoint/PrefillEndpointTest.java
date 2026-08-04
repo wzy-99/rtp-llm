@@ -354,6 +354,7 @@ class PrefillEndpointTest {
             @Override public void onExpired(BatchItem head) {}
             @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
             @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+            @Override public void onTransferNeeded(BatchItem item, String reason) {}
         };
     }
 }

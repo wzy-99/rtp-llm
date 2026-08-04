@@ -54,7 +54,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setFlexlbBatchSizeMax(1);        // single request triggers immediate dispatch
         cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
+        cfg.setFlexlbSloMs("50000");
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);

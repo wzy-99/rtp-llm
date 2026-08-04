@@ -32,7 +32,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setFlexlbBatchSizeMax(1);
         cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
+        cfg.setFlexlbSloMs("50000");
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         return cfg;

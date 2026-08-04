@@ -32,4 +32,16 @@ public interface BatchDecisionHandler {
      * @param error non-null if the batcher is stopped; null if the queue is full
      */
     void onOfferFailure(BatchItem item, Throwable error);
+
+    /**
+     * Called when a queued request is in the SLO danger zone and meets
+     * transfer eligibility criteria. The item has already been removed
+     * from the batcher queue and its transfer count incremented. The
+     * handler should roll back the current endpoint reservation and
+     * re-route the request through the scheduling flow.
+     *
+     * @param item   the item to be transferred
+     * @param reason human-readable reason (e.g. {@code "danger_zone"})
+     */
+    void onTransferNeeded(BatchItem item, String reason);
 }

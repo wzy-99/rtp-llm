@@ -113,7 +113,7 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private CostBasedPrefillStrategy createStrategy() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50_000L);
+        config.setFlexlbSloMs("50000");
         config.setPrefillQueueSizeThreshold(1_000_000L);
 
         ConfigService configService = Mockito.mock(ConfigService.class);
@@ -217,7 +217,7 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private static BalanceContext context(long requestId) {
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50_000L);
+        config.setFlexlbSloMs("50000");
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(1_024L);

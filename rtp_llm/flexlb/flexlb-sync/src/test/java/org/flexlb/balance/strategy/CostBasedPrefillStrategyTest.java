@@ -100,7 +100,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
+        config.setFlexlbSloMs("50000");
         config.setCostSloRiskMarginMs(50L);
         config.setScoreTieRandomEnabled(false);
 
@@ -117,7 +117,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
+        config.setFlexlbSloMs("50000");
         config.setCostSloRiskMarginMs(50L);
         config.setScoreTieRandomEnabled(false);
 
@@ -219,7 +219,7 @@ class CostBasedPrefillStrategyTest {
         }
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
+        config.setFlexlbSloMs("50000");
 
         ServerStatus result = strategy.select(buildContext(500, 7L, config), RoleType.PREFILL, null);
 
@@ -384,7 +384,7 @@ class CostBasedPrefillStrategyTest {
 
     private BalanceContext buildContext(long seqLen, long requestId) {
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
+        config.setFlexlbSloMs("50000");
         config.setCostSloRiskMarginMs(50L);
         return buildContext(seqLen, requestId, config);
     }

@@ -17,6 +17,9 @@ import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ACK_TO_RESPONSE_TIME_MS;
+import static org.flexlb.constant.MetricConstant.PRIORITY_EVICT_COUNT;
+import static org.flexlb.constant.MetricConstant.PRIORITY_CANCEL_COUNT;
+import static org.flexlb.constant.MetricConstant.PRIORITY_EVICT_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
@@ -99,7 +102,12 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (17 metrics)");
+        // Priority eviction metrics
+        monitor.register(PRIORITY_EVICT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(PRIORITY_CANCEL_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(PRIORITY_EVICT_VICTIM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
+        log.info("BatchSchedulerReporter initialized (20 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -345,5 +353,27 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(ACK_TO_RESPONSE_TIME_MS, tags, ackToResponseMs);
+    }
+
+    // ==================== Priority eviction metrics ====================
+
+    /**
+     * Report a priority eviction event.
+     * @param stage the eviction stage: "KV_FULL", "COMPUTE_SATURATED", "PREFILL_PENDING_FULL"
+     * @param victimCount number of victims evicted in this event
+     */
+    public void reportPriorityEvict(String stage, int victimCount) {
+        FlexMetricTags tags = FlexMetricTags.of("stage", stage);
+        monitor.report(PRIORITY_EVICT_COUNT, tags, 1.0);
+        monitor.report(PRIORITY_EVICT_VICTIM_COUNT, tags, victimCount);
+    }
+
+    /**
+     * Report a cancel RPC invocation.
+     * @param source the cancel source: "router" (DefaultRouter) or "scheduler" (FlexlbBatchScheduler)
+     */
+    public void reportPriorityCancel(String source) {
+        FlexMetricTags tags = FlexMetricTags.of("source", source);
+        monitor.report(PRIORITY_CANCEL_COUNT, tags, 1.0);
     }
 }

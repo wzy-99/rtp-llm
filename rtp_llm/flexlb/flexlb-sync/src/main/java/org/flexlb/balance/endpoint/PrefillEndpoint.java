@@ -263,7 +263,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         // Phase 4: update progress anchors. A queued batch cannot spend
         // predicted forward time until the worker reports it as RUNNING.
+        // Also write back TaskPhase per batch (highest phase among tasks).
         Map<Long, Boolean> activeBatchRunning = new HashMap<>();
+        Map<Long, TaskPhase> activeBatchPhase = new HashMap<>();
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
                 long batchId = task.getBatchId();
@@ -272,6 +274,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
                 boolean running = task.getPhase() == TaskPhase.RUNNING;
                 activeBatchRunning.merge(batchId, running, Boolean::logicalOr);
+                // Track the highest phase per batch for taskPhase write-back.
+                TaskPhase tp = task.getPhase();
+                if (tp != null) {
+                    activeBatchPhase.merge(batchId, tp, (existing, incoming) ->
+                            incoming.ordinal() > existing.ordinal() ? incoming : existing);
+                }
             }
         }
         for (Map.Entry<Long, Boolean> entry : activeBatchRunning.entrySet()) {
@@ -281,8 +289,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
             if (Boolean.TRUE.equals(entry.getValue())) {
                 batch.markRunning(statusMs);
+                batch.setTaskPhase(TaskPhase.RUNNING);
             } else {
                 batch.markQueued(statusMs);
+                TaskPhase phase = activeBatchPhase.get(entry.getKey());
+                if (phase != null) {
+                    batch.setTaskPhase(phase);
+                }
             }
         }
 
@@ -299,6 +312,31 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
             }
         }
+    }
+
+    // ==================== Priority Eviction (Stage 2) ====================
+
+    /**
+     * Find evictable queued requests from this endpoint's batcher PQ.
+     * Delegates to {@link WorkerBatcher#findEvictableQueuedRequests}.
+     *
+     * @param incomingPriority the incoming request's priority (victims must be strictly lower)
+     * @param needEvictCount   maximum number of victims to return
+     * @return list of evictable BatchItems (may be empty)
+     */
+    public java.util.List<BatchItem> findEvictableQueuedRequests(int incomingPriority, int needEvictCount) {
+        return batcher.findEvictableQueuedRequests(incomingPriority, needEvictCount);
+    }
+
+    /**
+     * Evict queued BatchItems from this endpoint's batcher PQ.
+     * Delegates to {@link WorkerBatcher#evictQueuedItems}.
+     * No engine cancel (pre-dispatch queue items).
+     *
+     * @param victims the BatchItems to evict
+     */
+    public void evictQueuedItems(java.util.List<BatchItem> victims) {
+        batcher.evictQueuedItems(victims);
     }
 
     // ==================== Pending Count ====================

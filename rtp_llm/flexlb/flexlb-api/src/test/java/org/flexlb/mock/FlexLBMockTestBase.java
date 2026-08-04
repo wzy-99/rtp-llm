@@ -19,6 +19,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
@@ -192,7 +193,7 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
                 configService, router,
-                endpointRegistry, dispatcher, reporter, null);
+                endpointRegistry, dispatcher, reporter, new EngineGrpcService(grpcClient), null);
 
         // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
@@ -281,7 +282,7 @@ public abstract class FlexLBMockTestBase {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setFlexlbBatchSizeMax(1);        // single request triggers dispatch
         cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
+        cfg.setFlexlbSloMs("50000");
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);

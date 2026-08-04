@@ -4,19 +4,21 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.CancelHandler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.CancelReasonPB;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
 
 @Component
-public class RouteService {
+public class RouteService implements CancelHandler {
 
     private final ConfigService configService;
     private final Router router;
@@ -104,4 +106,21 @@ public class RouteService {
         return flexlbBatchScheduler == null ? null
                 : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
     }
+
+    /**
+     * Cancel an inflight request with the given reason.
+     *
+     * <p>Phase 5 implementation: delegates to
+     * {@link FlexlbBatchScheduler#cancelRequest(long, CancelReasonPB)} which performs
+     * lifecycle.cancel + rollbackOnce + inflight removal + best-effort engine cancel
+     * RPC (Chain B). Signature unchanged from Phase 4 stub.
+     *
+     * @param requestId the request to cancel
+     * @param reason    the cancel reason (e.g. {@code CANCEL_REASON_PRIORITY_PREEMPTED})
+     */
+    @Override
+    public void cancel(long requestId, CancelReasonPB reason) {
+        flexlbBatchScheduler.cancelRequest(requestId, reason);
+    }
+
 }

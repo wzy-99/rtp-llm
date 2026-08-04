@@ -8,7 +8,9 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
+import org.flexlb.dao.loadbalance.EndpointFeasibility;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.RejectionReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
@@ -19,6 +21,7 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -52,7 +55,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return doSelect(balanceContext, roleType, group);
         } catch (Exception e) {
             Logger.warn("CostBasedPrefillStrategy select failed", e);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return ServerStatus.failure(StrategyErrorType.NO_AVAILABLE_WORKER, Collections.emptyMap());
         }
     }
 
@@ -70,18 +73,18 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
-        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
-        CandidateSet eligible = filterResult.endpoints();
+        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType), config);
+        CandidateSet eligible = filterResult.survivors();
         if (eligible.size() == 0) {
-            Logger.warn("Prefill select failed: no available endpoints, request_id={}, rejections={}",
-                    requestId, filterResult.rejections());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            Logger.warn("Prefill select failed: no available endpoints, request_id={}, rejected={}",
+                    requestId, filterResult.rejected());
+            return ServerStatus.failureWithFeasibility(StrategyErrorType.NO_AVAILABLE_WORKER, filterResult.rejected());
         }
 
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
 
         FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config, cacheMatchResults);
-        CandidateSet survivors = hardFilterResult.candidates();
+        CandidateSet survivors = hardFilterResult.survivors();
 
         // First pass: find the exact minimum score.
         long minScore = Long.MAX_VALUE;
@@ -109,11 +112,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
 
         if (selectedIndex < 0) {
-            Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
-            hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
-            Logger.warn("Prefill select failed: all filtered out, request_id={}, rejections={}",
-                    requestId, merged);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            List<EndpointFeasibility> allRejected = new ArrayList<>();
+            allRejected.addAll(filterResult.rejected());
+            allRejected.addAll(hardFilterResult.rejected());
+            Logger.warn("Prefill select failed: all filtered out, request_id={}, rejected={}",
+                    requestId, allRejected);
+            return ServerStatus.failureWithFeasibility(StrategyErrorType.NO_AVAILABLE_WORKER, allRejected);
         }
 
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
@@ -123,7 +127,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return buildServerStatus(best, roleType, requestId, minScore, config, bestCacheHit);
     }
 
-    private record EndpointFilterResult(CandidateSet endpoints, Map<String, Integer> rejections) {}
+    private record EndpointFilterResult(CandidateSet survivors, List<EndpointFeasibility> rejected) {}
     private static final class CandidateSet {
         private PrefillEndpoint[] endpoints = new PrefillEndpoint[0];
         private long[] cacheHits = new long[0];
@@ -195,7 +199,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return size;
         }
     }
-    private record FilterResult(CandidateSet candidates, Map<String, Integer> rejections) {}
+    private record FilterResult(CandidateSet survivors, List<EndpointFeasibility> rejected) {}
 
     private FilterResult applyHardFilters(CandidateSet eligible, long seqLen,
                                           FlexlbConfig config, Map<String, Integer> cacheMatchResults) {
@@ -207,7 +211,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
         int eligibleSize = eligible.size();
         CandidateSet feasible = eligible;
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        List<EndpointFeasibility> rejected = new ArrayList<>();
         FormulaEstimateMemo formulaEstimateMemo = new FormulaEstimateMemo(seqLen);
         long sumWaitMs = 0;
         long sumPendingCount = 0;
@@ -218,7 +222,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             PrefillEndpoint ep = eligible.endpoint(i);
             PrefillTimePredictor predictor = ep.getPredictor();
             if (predictor == null) {
-                rejections.merge("PREDICTOR_MISSING", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(ep.ipPort(), RejectionReason.PREDICTOR_MISSING, 0, 0, 0));
                 continue;
             }
 
@@ -228,7 +232,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             long endpointWaitMs = ep.realWaitTimeMs();
 
             if (sloFilterEnabled && endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
-                rejections.merge("SLO_VIOLATION", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(ep.ipPort(), RejectionReason.SLO_VIOLATION, 0, 0, 0));
                 continue;
             }
 
@@ -243,7 +247,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         feasible.size = feasibleCount;
 
         if (feasible.size() == 0) {
-            return new FilterResult(feasible, rejections);
+            return new FilterResult(feasible, rejected);
         }
 
         long avgWaitMs = sumWaitMs / feasible.size();
@@ -268,11 +272,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             }
 
             if (hotspotMultiplier > 0 && avgPendingCount > 0 && pendingCount > avgPendingCount * hotspotMultiplier) {
-                rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(feasible.endpoint(i).ipPort(), RejectionReason.HOTSPOT_FILTERED, 0, 0, 0));
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgWaitMs > 0 && endpointWaitMs > avgWaitMs * imbalanceMultiplier) {
-                rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(feasible.endpoint(i).ipPort(), RejectionReason.IMBALANCE_FILTERED, 0, 0, 0));
                 continue;
             }
 
@@ -285,36 +289,37 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
         feasible.size = survivorCount;
 
-        return new FilterResult(feasible, rejections);
+        return new FilterResult(feasible, rejected);
     }
 
-    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator, FlexlbConfig config) {
         CandidateSet result = candidateSets.get();
         result.reset(engineWorkerStatus.getModelWorkerCapacity(roleType));
         PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
+            return new EndpointFilterResult(result, List.of(new EndpointFeasibility("", RejectionReason.NO_REGISTERED, 0, 0, 0)));
         }
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        List<EndpointFeasibility> rejected = new ArrayList<>();
 
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof PrefillEndpoint pe)) {
                 return;
             }
             if (!pe.getStatus().isAlive()) {
-                rejections.merge("NOT_ALIVE", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(pe.ipPort(), RejectionReason.NOT_ALIVE, 0, 0, 0));
                 return;
             }
             if (!measure.isResourceAvailable(pe)) {
-                rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
+                long queueDeficit = Math.max(0, pe.realPendingCount() - config.getPrefillQueueSizeThreshold() + 1);
+                rejected.add(new EndpointFeasibility(pe.ipPort(), RejectionReason.RESOURCE_UNAVAILABLE, 0, 0, (int) queueDeficit));
                 return;
             }
             result.addEndpoint(pe);
         });
         if (registered == 0) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
+            return new EndpointFilterResult(result, List.of(new EndpointFeasibility("", RejectionReason.NO_REGISTERED, 0, 0, 0)));
         }
-        return new EndpointFilterResult(result, rejections);
+        return new EndpointFilterResult(result, rejected);
     }
 
     private static final class FormulaEstimateMemo {

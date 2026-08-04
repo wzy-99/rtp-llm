@@ -85,6 +85,11 @@ public:
     }
 
     ::grpc::Status
+    Cancel(::grpc::ServerContext* context, const ::CancelRequestPB* request, ::EmptyPB* response) override {
+        return local_server_->Cancel(context, request, response);
+    }
+
+    ::grpc::Status
     SetLogLevel(::grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response) override {
         return local_server_->SetLogLevel(context, request, response);
     }

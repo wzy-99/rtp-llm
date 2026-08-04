@@ -307,6 +307,19 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().enqueueBatch(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
     }
 
+    /**
+     * Cancel an inflight request on the engine via gRPC (async, best-effort).
+     * <p>Phase 5: Master → engine cancel RPC for priority preemption / client cancel.
+     * The engine looks up the stream by request_id and reports CANCELLED, which
+     * flows back through GetWorkerStatus finished_task_list for terminal收口.
+     */
+    public CompletableFuture<EngineRpcService.EmptyPB> cancelAsync(String ip, int port, long requestId, long requestTimeoutMs) {
+        EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
+                .setRequestId(requestId)
+                .build();
+        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request), requestTimeoutMs, ServiceType.CANCEL);
+    }
+
     @Override
     protected ManagedChannel createChannel(String channelKey) {
         String[] parts = parseServiceKey(channelKey);

@@ -64,6 +64,13 @@ public:
     grpc::Status
     UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
 
+    // Phase 5: Cancel an inflight stream by request_id. Looks up the stream in
+    // RpcServerRuntimeMeta, reports CANCELLED, and dequeues it to
+    // finished_streams_ so the next GetWorkerStatus reports it (error_code=CANCELLED)
+    // for Master terminal收口. Virtual so role-specific subclasses may override.
+    virtual grpc::Status
+    Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response);
+
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);

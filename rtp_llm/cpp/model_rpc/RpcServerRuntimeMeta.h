@@ -87,6 +87,19 @@ public:
         running_streams_.erase(ptr);
     }
 
+    // Look up a running stream by request_id (Phase 5: engine Cancel RPC).
+    // Returns nullptr if the request is not in running_streams_ (already
+    // finished or never enqueued). The returned shared_ptr keeps the stream
+    // alive; callers may safely reportError + dequeue outside the lock.
+    GenerateStreamPtr getStream(int64_t request_id) {
+        std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+        auto                                ptr = running_streams_.find(request_id);
+        if (ptr == running_streams_.end()) {
+            return nullptr;
+        }
+        return ptr->second.stream;
+    }
+
     void finishTask(int64_t            request_id,
                     int64_t            input_length  = 0,
                     int64_t            prefix_length = 0,

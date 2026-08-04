@@ -495,4 +495,24 @@ public class MetricConstant {
      * Dispatch executor completed task count (counter — monotonically increasing)
      */
     public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
+
+    /* ------------------------ Priority Eviction Monitoring -------------------------- */
+
+    /**
+     * Priority eviction trigger count (counter). Incremented each time an eviction
+     * succeeds in any stage (KV_FULL, COMPUTE_SATURATED, PREFILL_PENDING_FULL).
+     */
+    public static final String PRIORITY_EVICT_COUNT = "app.flexlb.priority.evict.count";
+
+    /**
+     * Cancel RPC invocation count (counter). Incremented each time the cancel
+     * RPC is invoked (both DefaultRouter.callCancel and FlexlbBatchScheduler.cancelRequest).
+     */
+    public static final String PRIORITY_CANCEL_COUNT = "app.flexlb.priority.cancel.count";
+
+    /**
+     * Total number of victim requests evicted (counter). Incremented by the
+     * number of victims removed in each eviction event.
+     */
+    public static final String PRIORITY_EVICT_VICTIM_COUNT = "app.flexlb.priority.evict.victim.count";
 }

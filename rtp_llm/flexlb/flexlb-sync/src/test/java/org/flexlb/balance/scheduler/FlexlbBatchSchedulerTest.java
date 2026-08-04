@@ -13,7 +13,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.CancelReasonPB;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,6 +37,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -63,7 +66,10 @@ class FlexlbBatchSchedulerTest {
         config.setScheduleWorkerSize(1);
         config.setFlexlbBatchSizeMax(2);
         config.setFlexlbBatchWindowMs(10_000);
-        config.setCostSloMs(50000L);
+        config.setFlexlbSloMs("50000");
+        config.setSloLengthIntervals("");
+        config.setSloPriorityMultipliers("");
+        config.setSloTransferEnabled(false);
         config.setCostSloRiskMarginMs(50L);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -78,10 +84,12 @@ class FlexlbBatchSchedulerTest {
                     sentBatches.add(request);
                     return CompletableFuture.completedFuture(ackFor(request));
                 });
+        when(grpcClient.cancelAsync(anyString(), anyInt(), anyLong(), anyLong()))
+                .thenAnswer(inv -> CompletableFuture.completedFuture(EngineRpcService.EmptyPB.getDefaultInstance()));
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         scheduler = new FlexlbBatchScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, null);
+                endpointRegistry, dispatcher, reporter, new EngineGrpcService(grpcClient), null);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -317,7 +325,7 @@ class FlexlbBatchSchedulerTest {
         // fillThreshold=2.0 → fillRatio can never reach it (max 1.0)
         // batchSizeMax=1000 → single request can't trigger size condition
         // So request parks, budget shrinks each 1ms iteration, after ~72ms budget < margin → urgent dispatch
-        config.setCostSloMs(300L);
+        config.setFlexlbSloMs("300");
         config.setCostSloRiskMarginMs(100L);
         config.setFlexlbBatchSizeMax(1000);
 
@@ -333,7 +341,7 @@ class FlexlbBatchSchedulerTest {
         // budget = sloMs(500) - predMs(128) = 372ms, margin = 50ms
         // fillRatio = 128/322 ≈ 0.40 >= threshold(0.3) → dispatches immediately via fillRatio
         // batchSizeMax=1000 ensures size condition is NOT the trigger
-        config.setCostSloMs(500L);
+        config.setFlexlbSloMs("500");
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(500);
         config.setFlexlbBatchSizeMax(1000);
@@ -352,7 +360,7 @@ class FlexlbBatchSchedulerTest {
         // incremental budget and are dispatched together in a single batch.
         // flexlbBatchScanAhead (default 64) determines how many candidates are
         // scanned per iteration.
-        config.setCostSloMs(500L);
+        config.setFlexlbSloMs("500");
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(100000);
         config.setFlexlbBatchSizeMax(100);
@@ -372,8 +380,7 @@ class FlexlbBatchSchedulerTest {
     @Test
     void resolveSloMs_uses_buckets_when_configured() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setCostSloMs(500L);
-        cfg.setCostSloBuckets("4096:2000,32768:10000,131072:30000,524288:60000");
+        cfg.setFlexlbSloMs("4096:2000,32768:10000,131072:30000,524288:60000");
 
         assertEquals(2000L, cfg.resolveSloMs(100));
         assertEquals(2000L, cfg.resolveSloMs(4096));
@@ -388,8 +395,7 @@ class FlexlbBatchSchedulerTest {
     @Test
     void resolveSloMs_falls_back_to_costSloMs_when_no_buckets() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setCostSloMs(500L);
-        cfg.setCostSloBuckets("");
+        cfg.setFlexlbSloMs("500");
 
         assertEquals(500L, cfg.resolveSloMs(100));
         assertEquals(500L, cfg.resolveSloMs(100000));
@@ -398,7 +404,7 @@ class FlexlbBatchSchedulerTest {
     @Test
     void resolveSloMs_handles_unsorted_bucket_input() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setCostSloBuckets("131072:30000,4096:2000,32768:10000");
+        cfg.setFlexlbSloMs("131072:30000,4096:2000,32768:10000");
 
         assertEquals(2000L, cfg.resolveSloMs(1000));
         assertEquals(10000L, cfg.resolveSloMs(5000));
@@ -410,7 +416,7 @@ class FlexlbBatchSchedulerTest {
         // With default costSloMs=500 and alpha1=1.0, a 600-token request has
         // predMs=600 > sloMs=500 → budget=0 → immediate drop.
         // With buckets "1000:5000,...", sloMs=5000 → budget=4400 → enough to batch.
-        config.setCostSloBuckets("1000:5000,100000:50000");
+        config.setFlexlbSloMs("1000:5000,100000:50000");
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchSizeMax(2);
 
@@ -567,5 +573,43 @@ class FlexlbBatchSchedulerTest {
         status.setGroup("g1");
         status.setRequestId(requestId);
         return status;
+    }
+
+    // ==================== Cancel RPC test ====================
+
+    @Test
+    void cancelRequest_cancels_inflight_and_notifies_engine() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+
+        // Use a non-completed future to keep the request inflight (pending ACK)
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ackFuture = new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    sentBatches.add(inv.getArgument(2));
+                    return ackFuture;
+                });
+
+        CompletableFuture<Response> future = scheduler.submit(context(501));
+
+        // Wait for the batch to be dispatched (but not ACKed)
+        for (int i = 0; i < 200 && sentBatches.isEmpty(); i++) {
+            Thread.sleep(10);
+        }
+        assertFalse(sentBatches.isEmpty(), "Batch should have been dispatched");
+        assertFalse(future.isDone(), "Request should be inflight (waiting for ACK)");
+
+        // Cancel the request
+        scheduler.cancelRequest(501, CancelReasonPB.CANCEL_REASON_PRIORITY_PREEMPTED);
+
+        // The future should complete with error
+        Response response = future.get(2, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess(), "Cancelled request should complete with error");
+
+        // Verify cancel RPC was called for prefill endpoint (10.0.0.1, grpcPort 8081)
+        verify(grpcClient).cancelAsync(eq("10.0.0.1"), eq(8081), eq(501L), anyLong());
+
+        // Verify cancel metric was reported
+        verify(reporter).reportPriorityCancel("scheduler");
     }
 }

@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.InflightEvictor;
+import org.flexlb.enums.TaskPhase;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -13,6 +14,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     private final long createdAtMs;
     private final AtomicLong progressBaseMs;
     private volatile boolean running;
+    private volatile TaskPhase taskPhase;
 
     BatchInflight(long predictTimeMs, List<BatchItem> requests) {
         this(predictTimeMs, requests, System.currentTimeMillis());
@@ -20,19 +22,21 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
 
     private BatchInflight(long predictTimeMs,
                           List<BatchItem> requests, long nowMs) {
-        this(predictTimeMs, requests, nowMs, nowMs, false);
+        this(predictTimeMs, requests, nowMs, nowMs, false, null);
     }
 
     private BatchInflight(long predictTimeMs,
                           List<BatchItem> requests,
                           long createdAtMs,
                           long progressBaseMs,
-                          boolean running) {
+                          boolean running,
+                          TaskPhase taskPhase) {
         this.predictTimeMs = predictTimeMs;
         this.requests = requests;
         this.createdAtMs = createdAtMs;
         this.progressBaseMs = new AtomicLong(progressBaseMs);
         this.running = running;
+        this.taskPhase = taskPhase;
     }
 
     long predictTimeMs() {
@@ -65,8 +69,16 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
         }
     }
 
+    TaskPhase getTaskPhase() {
+        return taskPhase;
+    }
+
+    void setTaskPhase(TaskPhase taskPhase) {
+        this.taskPhase = taskPhase;
+    }
+
     BatchInflight repack(long newPredictTimeMs, List<BatchItem> newRequests) {
         return new BatchInflight(newPredictTimeMs, newRequests,
-                createdAtMs, progressBaseMs(), running);
+                createdAtMs, progressBaseMs(), running, taskPhase);
     }
 }

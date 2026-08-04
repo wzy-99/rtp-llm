@@ -67,6 +67,10 @@ public class BatcherContext {
         return reporter;
     }
 
+    BatchDecisionHandler handler() {
+        return handler;
+    }
+
     long now() {
         return System.currentTimeMillis();
     }
@@ -110,6 +114,15 @@ public class BatcherContext {
         List<BatchItem> candidates = new ArrayList<>(queue);
         candidates.sort(Comparator.comparingLong(BatchItem::sortKey));
         return candidates;
+    }
+
+    /**
+     * Unsorted snapshot copy of the queue contents. Suitable for scans
+     * that need to inspect every item without ordering requirements
+     * (e.g. the transfer danger-zone scan).
+     */
+    List<BatchItem> snapshot() {
+        return new ArrayList<>(queue);
     }
 
     /**

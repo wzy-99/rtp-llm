@@ -10,6 +10,7 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.balance.planner.EvictionPlanner;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
@@ -48,6 +49,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.mock.env.MockEnvironment;
 
 import java.io.BufferedReader;
@@ -188,7 +190,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return new DefaultRouter(
                 configService,
                 ignored -> GroupRoutingDecision.none(),
-                endpointRegistry);
+                endpointRegistry,
+                engineWorkerStatus,
+                mock(ObjectProvider.class),
+                mock(ObjectProvider.class),
+                mock(EvictionPlanner.class));
     }
 
     @BeforeEach

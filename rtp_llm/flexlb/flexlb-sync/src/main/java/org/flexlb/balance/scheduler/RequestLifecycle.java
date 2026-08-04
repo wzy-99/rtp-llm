@@ -97,6 +97,21 @@ final class RequestLifecycle {
         return transition(RequestLifecycleState.COMPLETED, message);
     }
 
+    /**
+     * Terminate the lifecycle due to a cancel (client cancel or priority preemption).
+     * <p>Phase 5: maps cancel onto the existing FAILED terminal state without
+     * altering the state machine (no new states/transitions). The cancel reason
+     * is carried by {@code CancelReasonPB} and reflected in logs/metrics; the
+     * full {@code CANCELLED} terminal state is deferred to the Phase 6
+     * TerminalReason refactor.
+     */
+    synchronized RequestLifecycleSnapshot cancel(String message) {
+        if (state.isTerminal()) {
+            return snapshot();
+        }
+        return transition(RequestLifecycleState.FAILED, message);
+    }
+
     synchronized boolean isTerminal() {
         return state.isTerminal();
     }

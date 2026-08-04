@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.planner.EvictionPlanner;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalanceStrategy;
 import org.flexlb.balance.policy.GroupRoutingDecision;
@@ -15,7 +16,9 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.springframework.beans.factory.ObjectProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -66,6 +69,15 @@ class DefaultRouterTest {
     private EndpointRegistry endpointRegistry;
 
     @Mock
+    private ObjectProvider<CancelHandler> cancelHandlerProvider;
+
+    @Mock
+    private ObjectProvider<BatchSchedulerReporter> reporterProvider;
+
+    @Mock
+    private EvictionPlanner evictionPlanner;
+
+    @Mock
     private BalanceContext balanceContext;
 
     @Mock
@@ -102,7 +114,8 @@ class DefaultRouterTest {
 
         // Create scheduler instance
         lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
-        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, endpointRegistry);
+        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, endpointRegistry,
+            new EngineWorkerStatus(endpointRegistry), cancelHandlerProvider, reporterProvider, evictionPlanner);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();

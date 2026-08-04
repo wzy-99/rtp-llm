@@ -9,6 +9,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.EndpointFeasibility;
+import org.flexlb.dao.loadbalance.RejectionReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.route.RoleType;
@@ -21,7 +23,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Component("costBasedDecodeStrategy")
@@ -49,59 +50,77 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long expectedKvTokens = seqLen + maxNewTokens;
         FlexlbConfig config = balanceContext.getConfig();
 
-        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
-        List<DecodeEndpoint> eligible = filterResult.endpoints();
+        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType), config, seqLen);
+        List<DecodeEndpoint> eligible = filterResult.survivors();
         if (CollectionUtils.isEmpty(eligible)) {
-            Logger.warn("Decode select failed: no available endpoints, request_id={}, rejections={}",
-                    balanceContext.getRequestId(), filterResult.rejections());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            Logger.warn("Decode select failed: no available endpoints, request_id={}, rejected={}",
+                    balanceContext.getRequestId(), filterResult.rejected());
+            return ServerStatus.failureWithFeasibility(StrategyErrorType.NO_AVAILABLE_WORKER, filterResult.rejected());
         }
 
         FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config);
-        List<DecodeEndpoint> survivors = hardFilterResult.endpoints();
+        List<DecodeEndpoint> survivors = hardFilterResult.survivors();
 
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
             return buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens,
-                    roleType, balanceContext.getRequestId());
+                    roleType, balanceContext.getRequestId(), balanceContext.getPriority());
         }
 
-        Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
-        hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
-        Logger.warn("Decode select failed: all filtered out, request_id={}, rejections={}",
-                balanceContext.getRequestId(), merged);
-        return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        List<EndpointFeasibility> allRejected = new ArrayList<>();
+        allRejected.addAll(filterResult.rejected());
+        allRejected.addAll(hardFilterResult.rejected());
+        Logger.warn("Decode select failed: all filtered out, request_id={}, rejected={}",
+                balanceContext.getRequestId(), allRejected);
+        return ServerStatus.failureWithFeasibility(StrategyErrorType.NO_AVAILABLE_WORKER, allRejected);
     }
 
-    private record EndpointFilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections) {}
-    private record FilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections) {}
+    private record EndpointFilterResult(List<DecodeEndpoint> survivors, List<EndpointFeasibility> rejected) {}
+    private record FilterResult(List<DecodeEndpoint> survivors, List<EndpointFeasibility> rejected) {}
 
-    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator, FlexlbConfig config, long seqLen) {
         DecodeResourceMeasure measure = (DecodeResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
-            return new EndpointFilterResult(new ArrayList<>(), Map.of("NO_REGISTERED", 1));
+            return new EndpointFilterResult(new ArrayList<>(), List.of(new EndpointFeasibility("", RejectionReason.NO_REGISTERED, 0, 0, 0)));
         }
         List<DecodeEndpoint> result = new ArrayList<>(engineWorkerStatus.getModelWorkerCapacity(roleType));
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        List<EndpointFeasibility> rejected = new ArrayList<>();
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof DecodeEndpoint de)) {
                 return;
             }
             if (!de.getStatus().isAlive()) {
-                rejections.merge("NOT_ALIVE", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(de.ipPort(), RejectionReason.NOT_ALIVE, 0, 0, 0));
                 return;
             }
             if (!measure.isResourceAvailable(de)) {
-                rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
+                long concurrencyLimit = config.getDecodeConcurrencyLimit();
+                long slotDeficit = (concurrencyLimit > 0 && de.getTotalLoad() >= concurrencyLimit)
+                        ? Math.max(0, de.getTotalLoad() + 1 - concurrencyLimit) : 0;
+                long availableKv = de.realKvAvailable();
+                long kvDeficit = Math.max(0, seqLen - availableKv);
+
+                if (slotDeficit > 0 && kvDeficit > 0) {
+                    // Both slot and KV saturated — populate both deficits so the
+                    // EvictionPlanner dispatches to Case 4 (combined eviction).
+                    rejected.add(new EndpointFeasibility(de.ipPort(),
+                            RejectionReason.KV_UNAVAILABLE, kvDeficit, slotDeficit, 0));
+                } else if (slotDeficit > 0) {
+                    rejected.add(new EndpointFeasibility(de.ipPort(),
+                            RejectionReason.COMPUTE_SATURATED, 0, slotDeficit, 0));
+                } else {
+                    rejected.add(new EndpointFeasibility(de.ipPort(),
+                            RejectionReason.KV_UNAVAILABLE, kvDeficit, 0, 0));
+                }
                 return;
             }
             result.add(de);
         });
         if (registered == 0) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
+            return new EndpointFilterResult(result, List.of(new EndpointFeasibility("", RejectionReason.NO_REGISTERED, 0, 0, 0)));
         }
-        return new EndpointFilterResult(result, rejections);
+        return new EndpointFilterResult(result, rejected);
     }
 
     @Override
@@ -134,29 +153,30 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long avgCacheUsed = sumCacheUsed / n;
 
         List<DecodeEndpoint> survivors = new ArrayList<>(n);
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        List<EndpointFeasibility> rejected = new ArrayList<>();
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
             long availableKv = ep.realKvAvailable();
             long totalKv = ep.realKvTotal();
             if (totalKv > 0 && availableKv < seqLen) {
-                rejections.merge("KV_CAPACITY", 1, Integer::sum);
+                long kvDeficit = Math.max(0, seqLen - availableKv);
+                rejected.add(new EndpointFeasibility(ep.ipPort(), RejectionReason.KV_CAPACITY, kvDeficit, 0, 0));
                 continue;
             }
             if (hotspotMultiplier > 0 && avgLoad > 0
                     && loads[i] > avgLoad * hotspotMultiplier) {
-                rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(ep.ipPort(), RejectionReason.HOTSPOT_FILTERED, 0, 0, 0));
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgCacheUsed > 0
                     && kvUseds[i] > avgCacheUsed * imbalanceMultiplier) {
-                rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
+                rejected.add(new EndpointFeasibility(ep.ipPort(), RejectionReason.IMBALANCE_FILTERED, 0, 0, 0));
                 continue;
             }
             survivors.add(ep);
         }
 
-        return new FilterResult(survivors, rejections);
+        return new FilterResult(survivors, rejected);
     }
 
     private DecodeEndpoint weightedRandomSelection(List<DecodeEndpoint> candidateEndpoints) {
@@ -224,7 +244,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
                                            long expectedKvTokens, RoleType roleType,
-                                           long requestId) {
+                                           long requestId, int priority) {
         ServerStatus result = new ServerStatus();
         try {
             // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent
@@ -239,7 +259,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             if (totalKv > 0 && expectedKvTokens > totalKv) {
                 expectedKvTokens = totalKv;
             }
-            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens);
+            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens, priority);
 
             result.setSuccess(true);
             result.setRole(roleType);

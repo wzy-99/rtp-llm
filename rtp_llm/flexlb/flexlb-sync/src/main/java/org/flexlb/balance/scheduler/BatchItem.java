@@ -35,6 +35,28 @@ public final class BatchItem {
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
+    /**
+     * Request priority (30/40/50/60/70, default 50).
+     * Initialized from {@link BalanceContext#getRequest()} at construction time;
+     * may be updated by downstream logic (e.g. eviction).
+     */
+    private volatile int priority = 50;
+
+    /**
+     * SLO deadline (absolute epoch ms) computed by the batcher algorithm
+     * in {@link BatcherAlgorithm#computeSortKey}. Stored so the transfer
+     * scan can check danger-zone eligibility without re-deriving it from
+     * the sort key.
+     */
+    private volatile long deadline;
+
+    /**
+     * Number of times this request has been transferred between batchers.
+     * Incremented each time the SLO transfer logic re-routes the request.
+     * Capped by {@code FlexlbConfig.sloTransferMaxCount} to prevent storms.
+     */
+    private volatile int transferCount;
+
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -51,6 +73,9 @@ public final class BatchItem {
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
         this.enqueuedAtMs = enqueuedAtMs;
+        if (ctx != null && ctx.getRequest() != null) {
+            this.priority = ctx.getRequest().getPriority();
+        }
     }
 
     // -- accessors --
@@ -69,6 +94,27 @@ public final class BatchItem {
 
     /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
     public void setSortKey(long sortKey) { this.sortKey = sortKey; }
+
+    /** Request priority (higher = more urgent). */
+    public int priority() { return priority; }
+
+    /** Update priority (e.g. for eviction scenarios). */
+    public void setPriority(int priority) { this.priority = priority; }
+
+    /** SLO deadline (absolute epoch ms), set during sort-key computation. */
+    public long deadline() { return deadline; }
+
+    /** Set by {@link BatcherAlgorithm#computeSortKey} alongside the sort key. */
+    public void setDeadline(long deadline) { this.deadline = deadline; }
+
+    /** Number of times this request has been transferred between batchers. */
+    public int getTransferCount() { return transferCount; }
+
+    /** Set the transfer count (used when carrying over to a re-routed item). */
+    public void setTransferCount(int transferCount) { this.transferCount = transferCount; }
+
+    /** Increment the transfer count by one. */
+    public void incrementTransferCount() { this.transferCount++; }
 
     // -- derived accessors --
 

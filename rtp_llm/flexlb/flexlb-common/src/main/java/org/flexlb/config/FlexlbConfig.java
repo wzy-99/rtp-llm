@@ -388,17 +388,185 @@ public class FlexlbConfig {
      */
     private boolean costSloFilterEnabled = false;
 
-    private long costSloMs = 500;
+    /**
+     * Master switch for the priority eviction mechanism. When enabled, the
+     * scheduler may cancel lower-priority inflight/queued requests to make
+     * room for higher-priority incoming requests. Default true.
+     * Requires flexlbBatchAlgorithm=SLO_BUDGET to take
+     * effect (FixedWindow has no priority eviction, acts as pure FIFO fallback).
+     * Environment variable: FLEXLB_PRIORITY_EVICT_ENABLED.
+     */
+    private boolean flexlbPriorityEvictEnabled = false;
+
+    // ========== V4 Cost-Based Eviction Planner Configuration ==========
+
+    /**
+     * Master switch for the v4 cost-based eviction planner. When enabled, the
+     * eviction planner uses cost-based victim selection (EvictionCostFunction)
+     * instead of the greedy ordinal-based selection. Default false — must be
+     * explicitly enabled.
+     * Environment variable: FLEXLB_V4_EVICTION_ENABLED.
+     */
+    private boolean flexlbV4EvictionEnabled = true;
+
+    /**
+     * KV token normalisation divisor for the eviction cost function j/k.
+     * Default 1024. Environment variable: FLEXLB_V4_COST_M.
+     */
+    private long v4CostM = 1024L;
+
+    /**
+     * Run-status weight for NOT_ACCEPTED (ordinal 0). Default 1.0.
+     * Environment variable: FLEXLB_V4_G_NOT_ACCEPTED.
+     */
+    private double v4GNotAccepted = 1.0;
+
+    /**
+     * Run-status weight for ACCEPTED_NOT_RUNNING (ordinal 1). Default 4.0.
+     * Environment variable: FLEXLB_V4_G_ACCEPTED_NOT_RUNNING.
+     */
+    private double v4GAcceptedNotRunning = 4.0;
+
+    /**
+     * Run-status weight for RUNNING (ordinal 2). Default 16.0.
+     * Environment variable: FLEXLB_V4_G_RUNNING.
+     */
+    private double v4GRunning = 16.0;
+
+    /**
+     * Scenario weight for slot/concurrency-related eviction cases
+     * (COMPUTE_SATURATED, RESOURCE_UNAVAILABLE). Default 1.0.
+     * Environment variable: FLEXLB_V4_H_SLOT.
+     */
+    private double v4HSlot = 1.0;
+
+    /**
+     * Scenario weight for KV-related eviction cases
+     * (KV_CAPACITY, KV_UNAVAILABLE). Default 1.0.
+     * Environment variable: FLEXLB_V4_H_KV.
+     */
+    private double v4HKv = 1.0;
+
+    /**
+     * Maximum victims per eviction decision. The cost function uses
+     * {@code B = maxVictimsPerDecision + 1} as the exponential base for
+     * priority ranking: {@code f(priority) = B^rank(priority)}.
+     * Default 8, so B=9.
+     * Environment variable: V4_MAX_VICTIMS_PER_DECISION.
+     */
+    private int v4MaxVictimsPerDecision = 8;
+
+    /**
+     * SLO time limit in milliseconds. The value may be a single number
+     * (e.g. "500", applied globally) or a CSV of seqLen:sloMs buckets
+     * (e.g. "4096:2000,524288:60000", resolved per-request by seqLen).
+     * {@link #resolveSloMs(long)} auto-detects the format: values containing
+     * ':' or ',' are parsed as buckets; a pure number is the global SLO.
+     * Merges the former costSloMs (global) and costSloBuckets (CSV) fields.
+     * Environment variable: FLEXLB_SLO_MS.
+     */
+    private String flexlbSloMs = "500";
 
     private long costSloRiskMarginMs = 100;
 
-    private String costSloBuckets = "";
-
     private transient volatile List<long[]> parsedSloBuckets;
 
-    public void setCostSloBuckets(String costSloBuckets) {
-        this.costSloBuckets = costSloBuckets;
+    private transient volatile List<long[]> parsedSloLengthIntervals;
+
+    private transient volatile List<double[]> parsedSloPriorityMultipliers;
+
+    /**
+     * Urgent window range in milliseconds. A request whose deadline - now
+     * is less than this value is considered "urgent" and gets priority
+     * dispatch preference in the SLO-budget batcher.
+     * Environment variable: FLEXLB_SLO_URGENT_RANGE_MS.
+     */
+    private long flexlbSloUrgentRangeMs = 100;
+
+    /**
+     * Comma-separated list of valid priority levels (e.g. "30,40,50,60,70").
+     * Incoming priority values not in this set fall back to
+     * {@link #flexlbPriorityDefault}.
+     * Environment variable: FLEXLB_PRIORITY_LEVELS.
+     */
+    private String flexlbPriorityLevels = "30,40,50,60,70";
+
+    /**
+     * Default priority used when the incoming priority is missing (0 in
+     * proto3) or not in {@link #flexlbPriorityLevels}.
+     * Environment variable: FLEXLB_PRIORITY_DEFAULT.
+     */
+    private int flexlbPriorityDefault = 50;
+
+    /**
+     * Comma-separated length-interval SLO specification.
+     * Format: {@code upperBound:sloMs} pairs, e.g.
+     * {@code "256:150,1024:300,4096:600,16384:1200,*:2400"}.
+     * {@code *} is the catch-all for any length exceeding the last explicit bound.
+     * Resolved per-request by {@link #lookupLengthIntervalSlo(long)}.
+     * Environment variable: SLO_LENGTH_INTERVALS.
+     */
+    private String sloLengthIntervals = "256:150,1024:300,4096:600,16384:1200,*:2400";
+
+    /**
+     * Comma-separated priority SLO multiplier specification.
+     * Format: {@code priority:multiplier} pairs, e.g.
+     * {@code "30:2.0,40:1.5,50:1.0,60:0.75,70:0.5"}.
+     * Higher priority &rarr; smaller multiplier &rarr; shorter SLO.
+     * For an unknown priority, the nearest lower configured priority's
+     * multiplier is used (1.0 if none applies).
+     * Resolved per-request by {@link #lookupPriorityMultiplier(int)}.
+     * Environment variable: SLO_PRIORITY_MULTIPLIERS.
+     */
+    private String sloPriorityMultipliers = "30:2.0,40:1.5,50:1.0,60:0.75,70:0.5";
+
+    // ========== SLO Batcher Request Transfer Configuration ==========
+
+    /**
+     * Master switch for SLO batcher request transfer. When enabled, requests
+     * in the danger zone (deadline approaching within {@link #sloDangerThresholdMs})
+     * that meet eligibility criteria are removed from the batcher queue and
+     * re-routed through the scheduling flow.
+     * Environment variable: SLO_TRANSFER_ENABLED.
+     */
+    private boolean sloTransferEnabled = true;
+
+    /**
+     * Maximum number of times a single request may be transferred.
+     * Default 1 to prevent transfer storms.
+     * Environment variable: SLO_TRANSFER_MAX_COUNT.
+     */
+    private int sloTransferMaxCount = 1;
+
+    /**
+     * Danger-zone threshold in milliseconds. A request whose
+     * {@code deadline - now < sloDangerThresholdMs} is considered in the
+     * danger zone and becomes a transfer candidate.
+     * Environment variable: SLO_DANGER_THRESHOLD_MS.
+     */
+    private long sloDangerThresholdMs = 100;
+
+    /**
+     * Minimum priority for transfer eligibility. Requests with priority
+     * below this value (e.g. lowest-priority P30) are not transferred.
+     * Default 31 means P30 requests are excluded.
+     * Environment variable: SLO_TRANSFER_MIN_PRIORITY.
+     */
+    private int sloTransferMinPriority = 31;
+
+    public void setFlexlbSloMs(String flexlbSloMs) {
+        this.flexlbSloMs = flexlbSloMs;
         this.parsedSloBuckets = null;
+    }
+
+    public void setSloLengthIntervals(String sloLengthIntervals) {
+        this.sloLengthIntervals = sloLengthIntervals;
+        this.parsedSloLengthIntervals = null;
+    }
+
+    public void setSloPriorityMultipliers(String sloPriorityMultipliers) {
+        this.sloPriorityMultipliers = sloPriorityMultipliers;
+        this.parsedSloPriorityMultipliers = null;
     }
 
     private double costHotspotMultiplier = 3.0;
@@ -505,12 +673,14 @@ public class FlexlbConfig {
      * <ul>
      *   <li>{@code fixed_window} — Fixed time window batching with optional
      *       predictor-based early dispatch. No SLO deadline tracking, no EMA,
-     *       no request dropping (default).</li>
+     *       no request dropping.</li>
+     *   <li>{@code slo_priority} — Priority-aware SLO batching with deadline
+     *       tracking and priority-based eviction support (default).</li>
      *   <li>{@code slo_budget} — SLO-deadline-aware batching with EMA arrival
      *       rate estimation, budget-based greedy fill, and deadline-gated dispatch.</li>
      * </ul>
      */
-    private String flexlbBatchAlgorithm = "fixed_window";
+    private String flexlbBatchAlgorithm = "slo_priority";
 
     /**
      * Fixed wait time in milliseconds for the {@code fixed_window} batcher
@@ -599,7 +769,12 @@ public class FlexlbConfig {
     public long resolveSloMs(long seqLen) {
         List<long[]> buckets = getParsedSloBuckets();
         if (buckets == null || buckets.isEmpty()) {
-            return costSloMs;
+            // flexlbSloMs is a pure number (global SLO) — parse and return.
+            try {
+                return Long.parseLong(flexlbSloMs.trim());
+            } catch (NumberFormatException e) {
+                return 500L;
+            }
         }
         for (long[] bucket : buckets) {
             if (seqLen <= bucket[0]) {
@@ -609,15 +784,150 @@ public class FlexlbConfig {
         return buckets.get(buckets.size() - 1)[1];
     }
 
+    /**
+     * Look up the base SLO for a given sequence length using the
+     * {@link #sloLengthIntervals} configuration. Each interval is an
+     * {@code upperBound:sloMs} pair; the first interval whose upper bound
+     * is &ge; {@code seqLen} determines the SLO. A {@code *} catch-all
+     * interval (stored as {@link Long#MAX_VALUE}) matches any length.
+     *
+     * <p>If {@code sloLengthIntervals} is unset or empty, falls back to
+     * {@link #resolveSloMs(long)}.
+     *
+     * @param seqLen request sequence length in tokens
+     * @return base SLO in milliseconds
+     */
+    public long lookupLengthIntervalSlo(long seqLen) {
+        List<long[]> intervals = getParsedSloLengthIntervals();
+        if (intervals == null || intervals.isEmpty()) {
+            return resolveSloMs(seqLen);
+        }
+        for (long[] interval : intervals) {
+            if (seqLen <= interval[0]) {
+                return interval[1];
+            }
+        }
+        return intervals.get(intervals.size() - 1)[1];
+    }
+
+    /**
+     * Look up the SLO multiplier for a given priority using the
+     * {@link #sloPriorityMultipliers} configuration. Returns the
+     * multiplier of the nearest configured priority that is &le; the
+     * given priority. If no configured priority is &le; the given value,
+     * returns 1.0.
+     *
+     * @param priority request priority (e.g. 30/40/50/60/70)
+     * @return SLO multiplier (smaller = shorter SLO = higher urgency)
+     */
+    public double lookupPriorityMultiplier(int priority) {
+        List<double[]> multipliers = getParsedSloPriorityMultipliers();
+        if (multipliers == null || multipliers.isEmpty()) {
+            return 1.0;
+        }
+        double result = 1.0;
+        for (double[] entry : multipliers) {
+            if (priority >= (int) entry[0]) {
+                result = entry[1];
+            } else {
+                break;
+            }
+        }
+        return result;
+    }
+
+    private List<long[]> getParsedSloLengthIntervals() {
+        if (parsedSloLengthIntervals != null) {
+            return parsedSloLengthIntervals;
+        }
+        if (sloLengthIntervals == null || sloLengthIntervals.isBlank()) {
+            return null;
+        }
+        List<long[]> result = new ArrayList<>();
+        for (String entry : sloLengthIntervals.split(",")) {
+            String[] kv = entry.trim().split(":");
+            if (kv.length == 2) {
+                try {
+                    long upperBound;
+                    if ("*".equals(kv[0].trim())) {
+                        upperBound = Long.MAX_VALUE;
+                    } else {
+                        upperBound = Long.parseLong(kv[0].trim());
+                    }
+                    result.add(new long[]{upperBound, Long.parseLong(kv[1].trim())});
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        result.sort(Comparator.comparingLong(a -> a[0]));
+        parsedSloLengthIntervals = result;
+        return result;
+    }
+
+    private List<double[]> getParsedSloPriorityMultipliers() {
+        if (parsedSloPriorityMultipliers != null) {
+            return parsedSloPriorityMultipliers;
+        }
+        if (sloPriorityMultipliers == null || sloPriorityMultipliers.isBlank()) {
+            return null;
+        }
+        List<double[]> result = new ArrayList<>();
+        for (String entry : sloPriorityMultipliers.split(",")) {
+            String[] kv = entry.trim().split(":");
+            if (kv.length == 2) {
+                try {
+                    result.add(new double[]{
+                            Double.parseDouble(kv[0].trim()),
+                            Double.parseDouble(kv[1].trim())});
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        result.sort(Comparator.comparingDouble(a -> a[0]));
+        parsedSloPriorityMultipliers = result;
+        return result;
+    }
+
+    /**
+     * Resolve and validate the request priority. If the raw priority is 0
+     * (unset in proto3) or not in the configured valid levels, return the
+     * default priority.
+     *
+     * @param rawPriority Raw priority from the proto request
+     * @return Validated priority value
+     */
+    public int resolvePriority(int rawPriority) {
+        if (rawPriority == 0) {
+            return flexlbPriorityDefault;
+        }
+        if (flexlbPriorityLevels == null || flexlbPriorityLevels.isBlank()) {
+            return rawPriority > 0 ? rawPriority : flexlbPriorityDefault;
+        }
+        for (String level : flexlbPriorityLevels.split(",")) {
+            try {
+                if (Integer.parseInt(level.trim()) == rawPriority) {
+                    return rawPriority;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return flexlbPriorityDefault;
+    }
+
     private List<long[]> getParsedSloBuckets() {
         if (parsedSloBuckets != null) {
             return parsedSloBuckets;
         }
-        if (costSloBuckets == null || costSloBuckets.isBlank()) {
+        if (flexlbSloMs == null || flexlbSloMs.isBlank()) {
+            return null;
+        }
+        // Auto-detect: values containing ':' or ',' are parsed as buckets.
+        String trimmed = flexlbSloMs.trim();
+        if (!trimmed.contains(":") && !trimmed.contains(",")) {
             return null;
         }
         List<long[]> result = new ArrayList<>();
-        for (String entry : costSloBuckets.split(",")) {
+        for (String entry : trimmed.split(",")) {
             String[] kv = entry.trim().split(":");
             if (kv.length == 2) {
                 try {

@@ -136,6 +136,31 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         responseObserver.onCompleted();
     }
 
+    @Override
+    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+                       StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
+        if (shouldForwardToMaster()) {
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB forwarded =
+                    grpcForwarder.forwardCancelToMaster(request);
+            if (forwarded != null && forwarded.getFound()) {
+                responseObserver.onNext(forwarded);
+                responseObserver.onCompleted();
+                return;
+            }
+        }
+        routeService.cancel(request.getRequestId(), request.getReason());
+        RequestLifecycleSnapshot snapshot = routeService.getRequestState(
+                request.getRequestId(), request.getBatchId());
+        FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response =
+                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
+                        .setFound(snapshot != null);
+        if (snapshot != null) {
+            response.setLifecycle(toLifecycleProto(snapshot));
+        }
+        responseObserver.onNext(response.build());
+        responseObserver.onCompleted();
+    }
+
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
         return routeService.route(ctx).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
@@ -209,7 +234,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        int resolvedPriority = configService.loadBalanceConfig().resolvePriority(pb.getPriority());
+        request.setPriority(resolvedPriority);
         ctx.setRequest(request);
+        ctx.setPriority(resolvedPriority);
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());

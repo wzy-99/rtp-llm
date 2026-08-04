@@ -70,8 +70,10 @@ public class ConfigService {
         // If these throw, startup must abort rather than letting every
         // per-request call fail with a 500.
         // Note: getParsedSloBuckets() is private in FlexlbConfig and silently
-        // ignores parse errors, so it is not called here. getDefaultScheduleModeEnum()
-        // throws IllegalArgumentException for invalid schedule mode values.
+        // ignores parse errors, so it is not called here. It now parses
+        // flexlbSloMs (merged from costSloMs + costSloBuckets).
+        // getDefaultScheduleModeEnum() throws IllegalArgumentException for
+        // invalid schedule mode values.
         config.getDefaultScheduleModeEnum();
 
         dumpEffectiveConfig(config);
