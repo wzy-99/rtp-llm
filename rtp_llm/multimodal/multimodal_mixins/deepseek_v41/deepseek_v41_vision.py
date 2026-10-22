@@ -547,9 +547,19 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
 
     def get_preprocess_params(self):
         # Picklable CPU-only values: do not pass self or CUDA state to workers.
+        gpu_preprocess = False
+        if self._device.type == "cuda":
+            from rtp_llm.models_py.modules.dsv41.vision_preprocess_triton import (
+                _PILLOW_VERSION,
+                pillow_version,
+            )
+
+            # The GPU resize implementation is validated against one Pillow
+            # version. Keep the existing CPU processor for other runtime pins.
+            gpu_preprocess = pillow_version == _PILLOW_VERSION
         return {
             "processor_config": self.processor_config,
-            "gpu_preprocess": self._device.type == "cuda",
+            "gpu_preprocess": gpu_preprocess,
         }
 
     def validate_inputs(self, mm_inputs):

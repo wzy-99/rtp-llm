@@ -104,7 +104,16 @@ class DefaultOptimizationsTest(unittest.TestCase):
             DeepSeekV41VisionEmbedding, "_device", new_callable=PropertyMock
         ) as device:
             device.return_value = torch.device("cuda:0")
-            self.assertTrue(self.model.get_preprocess_params()["gpu_preprocess"])
+            with patch(
+                "rtp_llm.models_py.modules.dsv41.vision_preprocess_triton.pillow_version",
+                "11.2.1",
+            ):
+                self.assertTrue(self.model.get_preprocess_params()["gpu_preprocess"])
+            with patch(
+                "rtp_llm.models_py.modules.dsv41.vision_preprocess_triton.pillow_version",
+                "12.3.0",
+            ):
+                self.assertFalse(self.model.get_preprocess_params()["gpu_preprocess"])
         default = inspect.signature(self.model.preprocess_input).parameters[
             "gpu_preprocess"
         ]
